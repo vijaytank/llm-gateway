@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — LLM Gateway{% endblock %}
+{% block content %}
+<h1>Model Dashboard</h1>
+<p class="muted">Live state from Redis · generated {{ generated_at }}</p>
+<table>
+  <thead>
+    <tr>
+      <th>Status</th><th>Provider</th><th>Model</th><th>Tier</th>
+      <th>Score</th><th>Circuit</th><th>Last success</th><th>Enabled</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for m in models %}
+    <tr>
+      <td><span class="dot {{ m.color }}" title="{{ m.status }}"></span>{{ m.status }}</td>
+      <td>{{ m.provider }}</td>
+      <td>{{ m.model_name }}</td>
+      <td><span class="badge">{{ m.tier }}</span></td>
+      <td>{% if m.score is not none %}{{ "%.3f"|format(m.score) }}{% else %}—{% endif %}</td>
+      <td><span class="badge">{{ m.circuit }}</span></td>
+      <td>{{ m.last_success or "—" }}</td>
+      <td>{{ "yes" if m.enabled else "no" }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="8" class="muted">No models in registry. Run the setup wizard / seeder.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

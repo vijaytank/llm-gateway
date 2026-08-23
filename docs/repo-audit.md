@@ -342,3 +342,123 @@ llm-gateway/
 **Phase 0 audit is complete.** All required repositories are available, licenses are compatible, and the patterns identified in the plans are validated by the actual codebases. The `opencode-provider-nvidia-nim` translate.go is particularly valuable — it provides a near-complete implementation of the Anthropic Inbound Adapter (Phase 1 deliverable #6), saving significant development time.
 
 **Recommendation:** Proceed to Phase 1 implementation. No blockers found.
+
+---
+
+## Phase 1 Implementation Addendum (post-audit)
+
+**Date:** 2026-08-22
+**Status:** Phase 1 implemented; audit patterns consumed as planned.
+
+### How the audited patterns were used
+
+| Pattern (from this audit) | Consumed in |
+|---|---|
+| translate.go request/response mapping (opencode-provider) | `adapter/translation.py` — system prompt, tool_use/tool_result, image blocks, stop-reason map |
+| Structured probe verdicts + 12s timeout (free-router) | `gateway/health_startup.py`, `brain/health_scheduler.py` |
+| Consumer-group Redis stream processing (freerouter) | `brain/stream_reader.py` (XREADGROUP + XACK) |
+| Config search order env → file → defaults (freerouter config.ts) | `schemas/config.py` loaders + `wizard/setup.py` |
+| Rate-limit quota columns (llamux CSV schema) | `schemas/db.py` model_registry rpm/tpm/rpd columns, `scripts/seed_model_registry.py` |
+
+### Phase 1 gap-closure record
+
+Validation against the plan surfaced missing files that existing code imported.
+All resolved in this pass:
+
+- Added: `alembic.ini`, `alembic/env.py`, `alembic/script.py.mako`,
+  `alembic/versions/001_initial_schema.py` (mirrors `migrations/`)
+- Added: `scripts/seed_model_registry.py` (+ package init) — used by db-init and wizard
+- Added: `brain/config.py` (Issue 5 thresholds), `brain/main.py` (supervisord entrypoint)
+- Added: `adapter/schemas.py` (wire-format models), package `__init__.py` files
+- Added: `docker/Dockerfile.gateway`, `docker/Dockerfile.adapter`,
+  `docker/supervisord.gateway.conf`; docker-compose now builds from these with real
+  health checks and no placeholder DB passwords
+- Fixed: wizard alembic invocation (`upgrade head` was one argv token), broken
+  DATABASE_URL template, Pydantic validator crash on GatewayConfig,
+  stop-reason constant classes, missing imports in adapter/server.py
+- requirements.txt: `supervisord` → `supervisor` (correct PyPI name), removed
+  duplicate httpx pin and non-PyPI `llm-rate-limits-tracker` entry, added apscheduler
+
+**Verification:** all gateway/brain/adapter/schemas modules import cleanly;
+config YAML round-trip passes; scoring formula returns expected values.
+
+---
+
+## Phase 3 Implementation Addendum (post-audit)
+
+**Date:** 2026-08-23
+**Status:** Phase 3 implemented — local models & offline detection working.
+
+- Added: `brain/connectivity_monitor.py` — UDP probe to configured host/port
+  (default `1.1.1.1:53` from `connectivity:` config, not hardcoded) every 30s;
+  offline mode requires UDP failure AND ≥2 cloud providers with connection
+  errors (auth/rate-limit errors never count — Issue 10 fix)
+- Added: `gateway/local_discovery.py` — live discovery of Ollama/vLLM models
+  (`ollama list`, `/v1/models`). No hardcoded local model lists: whatever the
+  endpoints actually serve is what gets registered (plan DoD: no hardcoding).
+- Updated: `gateway/router_hook.py` — checks `gateway:offline_mode` in Redis;
+  offline → cloud models skipped; empty local pool + offline → structured
+  `503 {"error": "offline_no_local_models"}` (never a stack trace)
+- Offline key TTL=60s refreshed by monitor — crash-safe auto-recovery
+
+**Verification:** unit tests for all four Issue-10 scenarios pass; local
+fallback and offline recovery integration paths covered.
+
+---
+
+## Phase 4 Implementation Addendum (post-audit)
+
+**Date:** 2026-08-23
+**Status:** Phase 4 implemented — wizard, web UI, multi-mode deployment complete.
+142 unit tests passing; UI smoke-tested live over HTTP.
+
+### New components
+
+| File | Purpose |
+|---|---|
+| `ui/app.py` | FastAPI + Jinja2 SSR app on port 4002: dashboard (live Redis score/circuit/status), providers, stats (24h from model_stats_hourly), paginated logs (metadata only), provider add/toggle, auth |
+| `ui/auth.py` | bcrypt-hashed admin password in Postgres `ui_settings`; signed-cookie sessions (itsdangerous, 24h max); first-run `/setup` flow |
+| `ui/templates/*.html` | 6 server-rendered pages — zero JS bundler per plan constraint |
+| `wizard/provider_probe.py` | Shared custom-provider probe: GET /v1/models discovery + Issue-4 structured chat probe (content-filter/429 → healthy, 401/403 → rejected). Used by both wizard and UI |
+| `wizard/setup.py` (rewritten) | Full 7-question wizard: API keys → provider enablement → deployment mode → local models → custom providers (probed live) → UI password → service install. Idempotent; config validated before trusted; .env chmod 600 with random secrets |
+| `wizard/install_linux.py` | systemd user unit renderer + installer (no hardcoded paths) |
+| `wizard/install_macos.py` | LaunchAgent plist renderer + installer |
+| `wizard/install_windows.py` | Docker Desktop instructions only (Issue 13 MVP scope) |
+| `alembic/versions/002_add_ui_settings.py` | ui_settings table for the admin password hash |
+
+### Schema extension
+
+`schemas/config.py` gained `CustomProviderConfig` + `GatewayConfig.custom_providers`.
+Custom OpenAI-compatible endpoints flow into `config_generator.get_models_from_registry()`
+as `{name}-auto` entries. Only the API-key **env-var name** is stored in YAML —
+key values are read from the environment at generate time (test-enforced).
+
+### Patterns consumed from this audit (Phase 4)
+
+- free-router chmod-600 + interactive CLI onboarding → completed wizard flow
+- claude-adapter interactive setup UX → 7-question wizard structure
+- free-router probe verdict taxonomy (429/content_filter classification) →
+  `wizard/provider_probe.py`, shared by wizard and UI so both enforce the
+  same "probe before save" guarantee
+
+### docker-compose changes
+
+- `ui` service added (port 4002), profiles: `core` (no UI) / `full` (with UI);
+  data services always run
+- `POSTGRES_PASSWORD` now `${POSTGRES_PASSWORD:?required}` — stack refuses to
+  boot with placeholder credentials (fixed pre-existing `***` literal-password bug)
+
+### Verification record
+
+- `pytest tests/unit -q` → 142 passed (24 new Phase 4 tests: auth redirect/login/
+  session, dashboard reflects open circuit as red from Redis, custom provider
+  add/reject/toggle flows into LiteLLM model_list, env permissions, wizard
+  idempotency, installer renderers)
+- Live HTTP smoke on port 4002: health 200; unauthenticated → redirect to
+  login/setup; wrong password → 401; correct password sets signed cookie;
+  all pages render 200 with migrated schema
+- `docker compose --profile full config` validates; required-var guard verified
+- All new deps (jinja2, bcrypt, itsdangerous) pinned in requirements.txt and
+  logged in `dependency-audit.md`
+
+---

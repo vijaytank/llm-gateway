@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Logs — LLM Gateway{% endblock %}
+{% block content %}
+<h1>Request Logs</h1>
+<p class="muted">{{ total }} total entries — metadata only, never prompts/responses.</p>
+<table>
+  <thead>
+    <tr><th>Time (UTC)</th><th>Virtual model</th><th>Routed to</th><th>Provider</th>
+        <th>Status</th><th>Error</th><th>Latency (ms)</th><th>Tokens in/out</th></tr>
+  </thead>
+  <tbody>
+    {% for e in entries %}
+    <tr>
+      <td>{{ e.timestamp }}</td>
+      <td>{{ e.virtual_model }}</td>
+      <td>{{ e.actual_model }}</td>
+      <td>{{ e.provider }}</td>
+      <td><span class="badge">{{ e.status }}</span></td>
+      <td>{{ e.error_code }}</td>
+      <td>{{ e.latency_ms if e.latency_ms is not none else "—" }}</td>
+      <td>{{ e.input_tokens if e.input_tokens is not none else "—" }} / {{ e.output_tokens if e.output_tokens is not none else "—" }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="8" class="muted">No requests logged yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+<div class="pager">
+  {% if has_prev %}<a href="/logs?page={{ page - 1 }}">← Newer</a>{% endif %}
+  <span class="muted">Page {{ page }}</span>
+  {% if has_next %}<a href="/logs?page={{ page + 1 }}">Older →</a>{% endif %}
+</div>
+{% endblock %}

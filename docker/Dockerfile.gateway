@@ -1,0 +1,39 @@
+# docker/Dockerfile.gateway — LiteLLM proxy + routing brain + UI (supervisord)
+#
+# Per Issue 9: gateway (LiteLLM) and brain run as two processes in ONE
+# container, managed by supervisord. Brain crash never kills the proxy.
+# The same image also serves the web UI (ui.app) in the `full` profile.
+#
+# Build context is the PROJECT ROOT (compose sets context: ..), so paths
+# here are project-root relative.
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system deps (gcc needed by some pinned wheels)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python dependencies first for layer caching
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Application code
+COPY gateway/ ./gateway/
+COPY brain/ ./brain/
+COPY adapter/ ./adapter/
+COPY ui/ ./ui/
+COPY schemas/ ./schemas/
+COPY wizard/ ./wizard/
+COPY scripts/ ./scripts/
+COPY alembic.ini ./
+COPY alembic/ ./alembic/
+
+ENV PYTHONUNBUFFERED=1
+
+# Default: run the gateway entrypoint (boot order → config gen → LiteLLM).
+# Compose overrides with `command:` for the ui service (uvicorn ui.app).
+CMD ["python", "-m", "gateway.main"]
+
+EXPOSE 4000 4002

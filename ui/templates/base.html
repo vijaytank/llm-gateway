@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}LLM Gateway{% endblock %}</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background: #f5f6f8; color: #1a1d21; }
+    nav { background: #1a1d21; padding: 0 1.5rem; display: flex; align-items: center; gap: 1.25rem; }
+    nav .brand { color: #fff; font-weight: 700; margin-right: auto; padding: 0.9rem 0; }
+    nav a { color: #cfd4da; text-decoration: none; padding: 0.9rem 0.4rem; display: inline-block; }
+    nav a:hover { color: #fff; }
+    main { max-width: 1100px; margin: 1.5rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.4rem; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+    th, td { text-align: left; padding: 0.55rem 0.8rem; border-bottom: 1px solid #eceef0; font-size: 0.92rem; }
+    th { background: #fafbfc; font-weight: 600; }
+    tr:last-child td { border-bottom: none; }
+    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+    .dot.green { background: #2ea44f; } .dot.yellow { background: #dbab09; } .dot.red { background: #cf222e; }
+    .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 0.78rem; background: #e7ebef; }
+    form.inline { display: inline; }
+    button { cursor: pointer; }
+    .card { background: #fff; border-radius: 8px; padding: 1.25rem; box-shadow: 0 1px 3px rgba(0,0,0,.08); margin-bottom: 1.25rem; }
+    label { display: block; font-size: 0.85rem; font-weight: 600; margin: 0.7rem 0 0.25rem; }
+    input[type=text], input[type=password], input[type=url], select {
+      width: 100%; max-width: 420px; padding: 0.45rem 0.6rem; border: 1px solid #ccd2d8; border-radius: 6px; font-size: 0.95rem;
+    }
+    .msg { padding: 0.6rem 1rem; border-radius: 6px; background: #ddf4e4; color: #116329; margin-bottom: 1rem; }
+    .err { padding: 0.6rem 1rem; border-radius: 6px; background: #ffebe9; color: #cf222e; margin-bottom: 1rem; }
+    .muted { color: #6a737d; font-size: 0.85rem; }
+    .pager { margin-top: 1rem; display: flex; gap: 1rem; align-items: center; }
+    table.chart td { padding: 2px 1px; }
+    .bar { background: #4c7dd0; height: 12px; min-width: 1px; display: inline-block; vertical-align: middle; }
+    .bar.err { background: #cf222e; }
+  </style>
+</head>
+<body>
+<nav>
+  <span class="brand">LLM Gateway</span>
+  <a href="/">Dashboard</a>
+  <a href="/providers">Providers</a>
+  <a href="/stats">Stats</a>
+  <a href="/logs">Logs</a>
+  <a href="/logout">Logout</a>
+</nav>
+<main>
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

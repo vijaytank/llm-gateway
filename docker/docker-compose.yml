@@ -1,0 +1,174 @@
+# Profiles (Phase 4):
+#   --profile core : data services + gateway + adapter (no UI)
+#   --profile full : everything including the web UI on port 4002
+# Data services (postgres, redis, db-init) have no profile and always run.
+# POSTGRES_PASSWORD comes from .env / environment — never hardcoded.
+#
+# NOTE on paths: build context and host bind paths are relative to THIS
+# file's directory, so the standard invocation works:
+#   cd docker && docker compose --profile full up -d
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: llm_gateway
+      POSTGRES_USER: llm_gateway
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set (see .env.example)}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U llm_gateway -d llm_gateway"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy allkeys-lru"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+
+  db-init:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gateway
+    restart: no
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    working_dir: /app
+    environment:
+      - DATABASE_URL=postgresql://llm_gateway:${POSTGRES_PASSWORD}@postgres:5432/llm_gateway
+      - REDIS_URL=redis://redis:6379/0
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        alembic upgrade head && python scripts/seed_model_registry.py
+    networks:
+      - internal
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gateway
+    restart: unless-stopped
+    profiles: ["core", "full"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request as u; u.urlopen('http://localhost:4000/health/liveliness', timeout=5)\" || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 45s
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - GATEWAY_CONFIG_PATH=/app/gateway_config.yaml
+      - LITELLM_CONFIG_PATH=/app/litellm_config.yaml
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - CEREBRAS_API_KEY=${CEREBRAS_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      # NOTE: no DATABASE_URL here. LiteLLM's own Prisma layer is disabled —
+      # our CustomLogger callbacks handle Postgres logging; auth uses the
+      # master key from config (avoids "LiteLLM_VerificationTokenView does
+      # not exist" errors from an un-migrated Prisma schema).
+    ports:
+      - "4000:4000"
+    volumes:
+      - ../gateway_config.yaml:/app/gateway_config.yaml:ro
+    networks:
+      - internal
+
+  adapter:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.adapter
+    restart: unless-stopped
+    profiles: ["core", "full"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request as u; u.urlopen('http://localhost:4001/health', timeout=5)\" || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 20s
+    depends_on:
+      gateway:
+        condition: service_healthy
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      - GATEWAY_BASE_URL=http://gateway:4000
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://llm_gateway:${POSTGRES_PASSWORD}@postgres:5432/llm_gateway
+    ports:
+      - "4001:4001"
+    networks:
+      - internal
+
+  ui:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gateway   # same image: full dependency set
+    restart: unless-stopped
+    profiles: ["full"]
+    command: ["python", "-m", "uvicorn", "ui.app:app", "--host", "0.0.0.0", "--port", "4002"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request as u; u.urlopen('http://localhost:4002/health', timeout=5)\" || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 20s
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      - DATABASE_URL=postgresql://llm_gateway:${POSTGRES_PASSWORD}@postgres:5432/llm_gateway
+      - REDIS_URL=redis://redis:6379/0
+      - GATEWAY_CONFIG_PATH=/app/gateway_config.yaml
+      - SESSION_SECRET=${SESSION_SECRET:-}
+    ports:
+      - "4002:4002"
+    volumes:
+      - ../gateway_config.yaml:/app/gateway_config.yaml
+    networks:
+      - internal
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  internal:
+    driver: bridge

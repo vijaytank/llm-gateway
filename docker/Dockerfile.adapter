@@ -1,0 +1,19 @@
+# docker/Dockerfile.adapter — Anthropic inbound adapter (FastAPI, port 4001)
+#
+# Build context is the PROJECT ROOT (compose sets context: ..), so paths
+# here are project-root relative.
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir fastapi==0.115.0 "uvicorn[standard]==0.32.0" \
+    pydantic==2.9.0 httpx==0.27.0 python-dotenv==1.0.1
+
+COPY adapter/ ./adapter/
+COPY schemas/ ./schemas/
+
+ENV PYTHONUNBUFFERED=1
+EXPOSE 4001
+
+CMD ["uvicorn", "adapter.server:app", "--host", "0.0.0.0", "--port", "4001"]

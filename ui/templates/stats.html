@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Stats — LLM Gateway{% endblock %}
+{% block content %}
+<h1>Statistics — last 24 hours</h1>
+<p class="muted">{{ total_requests }} requests · {{ total_errors }} errors (from model_stats_hourly)</p>
+
+{% if not has_data %}
+<div class="card muted">No request data in the last 24 hours.</div>
+{% else %}
+<div class="card">
+  <h2 style="font-size:1rem;">Requests vs Errors per hour</h2>
+  {% set max_val = series.requests | max %}
+  <table class="chart">
+    {% for b in buckets %}
+    <tr>
+      <td class="muted" style="width:60px; font-size:.78rem;">{{ b }}</td>
+      <td style="width:45%;">
+        <span class="bar" style="width: {{ (series.requests[loop.index0] / max_val * 100) | round(1) if max_val else 0 }}%;"></span>
+        <span class="muted" style="font-size:.75rem;">{{ series.requests[loop.index0] | int }}</span>
+      </td>
+      <td>
+        <span class="bar err" style="width: {{ (series.errors[loop.index0] / max_val * 100) | round(1) if max_val else 0 }}%;"></span>
+        <span class="muted" style="font-size:.75rem;">{{ series.errors[loop.index0] | int }}</span>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div class="card">
+  <h2 style="font-size:1rem;">Avg latency per hour (ms)</h2>
+  <table>
+    <thead><tr><th>Hour</th><th>Avg latency (ms)</th></tr></thead>
+    <tbody>
+      {% for b in buckets %}
+      <tr><td>{{ b }}</td><td>{{ series.avg_latency_ms[loop.index0] }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

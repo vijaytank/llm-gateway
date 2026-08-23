@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Providers — LLM Gateway{% endblock %}
+{% block content %}
+<h1>Providers</h1>
+{% if message %}<p class="msg">{{ message }}</p>{% endif %}
+
+<h2 style="font-size:1.05rem;">Built-in providers</h2>
+<table>
+  <thead><tr><th>Name</th><th>Enabled</th><th>Tier</th><th>Probe timeout (s)</th><th>Notes</th></tr></thead>
+  <tbody>
+    {% for p in builtin %}
+    <tr>
+      <td>{{ p.name }}</td>
+      <td>{{ "yes" if p.config.enabled else "no" }}</td>
+      <td><span class="badge">{{ p.config.tier }}</span></td>
+      <td>{{ p.config.probe_timeout_seconds }}</td>
+      <td class="muted">
+        {% if p.name == 'openrouter' and p.config.warn_on_charge_risk %}charge-risk warning active (effective RPD {{ p.config.effective_rpd }}){% endif %}
+        {% if p.name == 'local' %}ollama: {{ p.config.ollama_base_url or '—' }}{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2 style="font-size:1.05rem; margin-top:1.5rem;">Custom providers</h2>
+<table>
+  <thead><tr><th>Name</th><th>Base URL</th><th>Tier</th><th>Models</th><th>Enabled</th><th>Action</th></tr></thead>
+  <tbody>
+    {% for c in custom %}
+    <tr>
+      <td>{{ c.name }}</td>
+      <td>{{ c.base_url }}</td>
+      <td><span class="badge">{{ c.tier }}</span></td>
+      <td class="muted">{{ c.models | join(', ') }}</td>
+      <td>{{ "yes" if c.enabled else "no" }}</td>
+      <td>
+        <form class="inline" method="post" action="/providers/{{ c.name }}/toggle">
+          <button type="submit">{{ "Disable" if c.enabled else "Enable" }}</button>
+        </form>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="muted">No custom providers configured.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2 style="font-size:1.05rem; margin-top:1.5rem;">Add custom provider</h2>
+<div class="card">
+  <p class="muted">The provider is probed live (GET /v1/models, then a chat completion) before it is saved.
+     The API key is referenced by environment-variable name only — the key itself never enters the config file.</p>
+  <form method="post" action="/providers/add">
+    <label for="name">Name (lowercase letters, digits, - or _)</label>
+    <input type="text" id="name" name="name" required pattern="[a-z0-9][a-z0-9_-]*">
+    <label for="base_url">Base URL (OpenAI-compatible)</label>
+    <input type="url" id="base_url" name="base_url" placeholder="https://example.com/v1" required>
+    <label for="api_key_env">API key env var name (optional, e.g. MY_PROVIDER_API_KEY)</label>
+    <input type="text" id="api_key_env" name="api_key_env">
+    <label for="tier">Tier</label>
+    <select id="tier" name="tier">
+      <option value="free">free</option>
+      <option value="premium">premium</option>
+    </select>
+    <label for="capabilities">Capabilities (comma-separated)</label>
+    <input type="text" id="capabilities" name="capabilities" value="general">
+    <p style="margin-top:1rem;"><button type="submit">Probe &amp; Add Provider</button></p>
+  </form>
+</div>
+{% endblock %}

@@ -21,11 +21,19 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    Uuid,
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+# Dialect-portable types: plain Uuid/JSON elsewhere, native UUID/JSONB on Postgres.
+from sqlalchemy import JSON as SA_JSON
+
+from sqlalchemy.dialects.postgresql import UUID
+PG_UUID = Uuid().with_variant(UUID(as_uuid=True), "postgresql")
+PG_JSON = SA_JSON().with_variant(JSONB, "postgresql")
 
 
 class Base(DeclarativeBase):
@@ -37,11 +45,11 @@ class ModelRegistry(Base):
 
     __tablename__ = "model_registry"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(PG_UUID, primary_key=True, default=uuid.uuid4)
     provider: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     model_name: Mapped[str] = mapped_column(String(256), nullable=False)
     tier: Mapped[str] = mapped_column(String(16), nullable=False, default="free")  # free, premium
-    capabilities: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    capabilities: Mapped[list[str]] = mapped_column(PG_JSON, nullable=False, default=list)
     enabled: Mapped[bool] = mapped_column(nullable=False, default=True)
     probe_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=12)
     source: Mapped[str] = mapped_column(String(32), nullable=False, default="builtin")  # builtin, custom
@@ -59,7 +67,7 @@ class ModelRegistry(Base):
     tpd: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # tokens per day
 
     # Extra metadata
-    extra: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    extra: Mapped[dict] = mapped_column(PG_JSON, nullable=False, default=dict)
 
     __table_args__ = (
         UniqueConstraint("provider", "model_name", name="uq_model_registry_provider_model"),
@@ -75,7 +83,7 @@ class RequestLog(Base):
 
     __tablename__ = "request_logs"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(PG_UUID, primary_key=True, default=uuid.uuid4)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
 
     # Client identification
@@ -103,8 +111,8 @@ class RequestLog(Base):
     routing_decision_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Full request/response metadata (JSON for flexibility)
-    request_metadata: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-    response_metadata: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    request_metadata: Mapped[dict] = mapped_column(PG_JSON, nullable=False, default=dict)
+    response_metadata: Mapped[dict] = mapped_column(PG_JSON, nullable=False, default=dict)
 
     __table_args__ = (
         Index("ix_request_logs_timestamp_status", "timestamp", "status"),
@@ -121,7 +129,7 @@ class ModelStatsHourly(Base):
 
     __tablename__ = "model_stats_hourly"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(PG_UUID, primary_key=True, default=uuid.uuid4)
     model_name: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
     provider: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     hour_bucket: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
@@ -149,7 +157,7 @@ class ModelStatsDaily(Base):
 
     __tablename__ = "model_stats_daily"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(PG_UUID, primary_key=True, default=uuid.uuid4)
     model_name: Mapped[str] = mapped_column(String(256), nullable=False, index=True)
     provider: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     day_bucket: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
@@ -173,3 +181,22 @@ class ModelStatsDaily(Base):
 
     def __repr__(self) -> str:
         return f"<ModelStatsDaily(model={self.model_name}, provider={self.provider}, day={self.day_bucket})>"
+
+
+class UiSetting(Base):
+    """Key/value store for UI settings (admin password hash, session config).
+
+    The admin password is stored bcrypt-hashed — never plaintext (Phase 4
+    deliverable 2: authentication via single admin password).
+    """
+
+    __tablename__ = "ui_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<UiSetting(key={self.key})>"

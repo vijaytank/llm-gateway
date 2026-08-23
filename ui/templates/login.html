@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Login — LLM Gateway</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #f5f6f8; display: grid; place-items: center; min-height: 100vh; margin: 0; }
+    .card { background: #fff; padding: 2rem; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,.1); width: 360px; }
+    h1 { font-size: 1.2rem; margin-top: 0; }
+    label { display:block; font-size:.85rem; font-weight:600; margin-top:.8rem; }
+    input { width: 100%; padding: 0.5rem; margin: 0.3rem 0; border: 1px solid #ccd2d8; border-radius: 6px; box-sizing: border-box; }
+    button { width: 100%; padding: 0.55rem; margin-top: 1rem; background: #1a1d21; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
+    .err { background: #ffebe9; color: #cf222e; padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+<div class="card">
+  <h1>LLM Gateway — Sign In</h1>
+  {% if error %}<p class="err">{{ error }}</p>{% endif %}
+  <form method="post" action="/login">
+    <label for="password">Admin password</label>
+    <input type="password" id="password" name="password" required autofocus>
+    <button type="submit">Sign in</button>
+  </form>
+</div>
+</body>
+</html>
