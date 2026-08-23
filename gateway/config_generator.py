@@ -29,9 +29,11 @@ def _registry_models() -> list:
         from sqlalchemy.orm import Session
         from schemas.db import ModelRegistry
 
-        url = _os.environ.get("DATABASE_URL", "")
+        # GATEWAY_DB_URL preferred: a bare DATABASE_URL in the gateway process
+        # makes LiteLLM enable its Prisma layer (schema reset risk).
+        url = _os.environ.get("GATEWAY_DB_URL") or _os.environ.get("DATABASE_URL", "")
         if not url:
-            print("[config_generator] DATABASE_URL not set; cannot read registry")
+            print("[config_generator] GATEWAY_DB_URL/DATABASE_URL not set; cannot read registry")
             return []
         engine = create_engine(url)
         with Session(engine) as session:
@@ -227,10 +229,14 @@ def get_models_from_registry(config: GatewayConfig) -> list[dict[str, Any]]:
             "api_base": cp.base_url,
             "rpm": cp.rpm,
         }
-        if cp.api_key_env:
-            api_key = os.environ.get(cp.api_key_env, "")
-            if api_key:
-                params["api_key"] = api_key
+        api_key = os.environ.get(cp.api_key_env, "") if cp.api_key_env else ""
+        if not api_key:
+            # LiteLLM's openai/ provider route refuses to build a client
+            # without an api_key, even for endpoints that need none. A
+            # placeholder satisfies the client constructor; auth_type="none"
+            # providers simply ignore it upstream.
+            api_key = "not-required"
+        params["api_key"] = api_key
         model_list.append({
             "model_name": f"{cp.name}-auto",
             "litellm_params": params,
@@ -294,6 +300,14 @@ def generate_litellm_config(config: GatewayConfig) -> dict[str, Any]:
         "fallbacks": {},
         "cache": config.litellm_settings.cache,
     }
+
+    # Custom logger callbacks (request_logs + Redis stream for the brain).
+    # LiteLLM loads these from litellm_settings.callbacks (dotted import
+    # paths) — the CUSTOM_CALLBACKS env var is not a LiteLLM feature.
+    callbacks_env = os.environ.get("GATEWAY_CALLBACKS", "gateway.callbacks.custom_logger")
+    callbacks_list = [c.strip() for c in callbacks_env.split(",") if c.strip()]
+    if callbacks_list:
+        litellm_config["litellm_settings"] = {"callbacks": callbacks_list}
     
     # Add cache configuration
     if config.litellm_settings.cache:

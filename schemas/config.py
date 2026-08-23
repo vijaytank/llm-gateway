@@ -155,6 +155,9 @@ class MetaConfig(BaseModel):
 
 class GatewayConfig(BaseModel):
     """Top-level gateway configuration. This is the canonical schema."""
+
+    model_config = {"protected_namespaces": ()}  # `model_list` is our field, not pydantic's
+
     meta: MetaConfig = Field(default_factory=MetaConfig)
     general_settings: GeneralSettings = Field(default_factory=GeneralSettings)
     routing_defaults: RoutingDefaults = Field(default_factory=RoutingDefaults)

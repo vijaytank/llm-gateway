@@ -59,23 +59,48 @@ async def health_check():
     return {"status": "healthy", "service": "anthropic-adapter", "version": "1.0.0"}
 
 
+
+def _forward_headers(request_headers=None) -> dict:
+    """Auth headers for gateway calls. The gateway enforces its master key, so
+    forwarded requests must carry it — from the client's own Authorization
+    header (Anthropic clients send x-api-key; OpenAI-style send Bearer), or
+    from GATEWAY_API_KEY env as fallback."""
+    headers = {}
+    if request_headers is not None:
+        auth = request_headers.get("authorization")
+        api_key = request_headers.get("x-api-key")
+        if auth:
+            headers["Authorization"] = auth
+        elif api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+    if not headers.get("Authorization"):
+        env_key = os.environ.get("GATEWAY_API_KEY", "")
+        if env_key:
+            headers["Authorization"] = f"Bearer {env_key}"
+    return headers
+
+
 @app.post("/v1/messages")
-async def anthropic_messages(request: AnthropicMessageRequest):
+async def anthropic_messages(
+    request: AnthropicMessageRequest,
+    raw_request: Request,
+):
     """
     Handle Anthropic /v1/messages POST.
-    
+
     Translates Anthropic request shape to OpenAI chat/completions format,
     forwards to gateway, then translates response back to Anthropic format.
     """
     try:
         # Step 1: Translate Anthropic request to OpenAI format
         oai_request = translate_anthropic_to_openai_request(request.dict())
-        
-        # Step 2: Forward to gateway using httpx
+
+        # Step 2: Forward to gateway using httpx (with auth headers)
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{GATEWAY_BASE_URL}/v1/chat/completions",
                 json=oai_request,
+                headers=_forward_headers(raw_request.headers),
                 timeout=60.0,
             )
         
@@ -116,6 +141,7 @@ async def stream_anthropic_to_openai(
 @app.post("/v1/messages/stream")
 async def anthropic_messages_stream(
     request: AnthropicMessageRequest,
+    raw_request: Request,
 ):
     """
     Handle Anthropic /v1/messages/stream POST with streaming.
@@ -133,6 +159,7 @@ async def anthropic_messages_stream(
                 "POST",
                 f"{GATEWAY_BASE_URL}/v1/chat/completions",
                 json=oai_request,
+                headers=_forward_headers(raw_request.headers),
                 timeout=60.0,
             ) as gateway_response:
                 # Translate and stream back as Anthropic events
@@ -182,6 +209,7 @@ async def openai_chat_completions(request: Request):
             response = await client.post(
                 f"{GATEWAY_BASE_URL}/v1/chat/completions",
                 json=body,
+                headers=_forward_headers(request.headers),
                 timeout=60.0,
             )
         

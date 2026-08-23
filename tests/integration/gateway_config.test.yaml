@@ -1,0 +1,102 @@
+# tests/integration/gateway_config.test.yaml — Gateway config used ONLY by the
+# integration-test compose profile. Validated by the canonical GatewayConfig
+# Pydantic schema at gateway boot, exactly like the production
+# gateway_config.yaml. Nothing here is hardcoded into production code.
+#
+# The virtual chain exercises LiteLLM's native group failover across three
+# scriptable custom providers (all served by the one mock container), in the
+# same primary → fallback → last-resort shape as the free chains.
+
+meta:
+  schema_version: "1.0"
+
+general_settings:
+  master_key: "sk-test-integration-master-key-0123456789abcdef"
+  database_url: "${GATEWAY_DB_URL}"
+  redis_url: "${GATEWAY_REDIS_URL}"
+  background_health_checks: true
+  use_shared_health_check: true
+
+routing_defaults:
+  latency_slow_threshold_ms: 8000
+  latency_critical_threshold_ms: 20000
+  circuit_breaker_failure_count: 3
+  circuit_breaker_window_seconds: 300
+  cooldown_429_seconds: 600
+  cooldown_5xx_seconds: 1800
+  cooldown_auth_seconds: 86400
+  score_weight_success_rate: 0.40
+  score_weight_latency: 0.35
+  score_weight_quota_headroom: 0.25
+  quota_deprioritize_threshold: 0.80
+  health_check_base_interval_seconds: 7200
+  health_check_error_backoff_multiplier: 2.0
+  health_check_max_interval_seconds: 21600
+  moving_avg_window: 50
+
+connectivity:
+  offline_probe_host: "1.1.1.1"
+  offline_probe_port: 53
+  offline_probe_interval_seconds: 30
+  min_provider_failures_for_offline: 2
+
+providers:
+  nvidia:
+    enabled: true
+    tier: free
+    probe_timeout_seconds: 12
+    extra_headers: {}
+  openrouter:
+    enabled: false
+    tier: free
+    extra_headers:
+      HTTP-Referer: "http://localhost:4000"
+      X-Title: "llm-gateway"
+    warn_on_charge_risk: true
+    effective_rpd: 40
+  groq:
+    enabled: false
+    tier: free
+  cerebras:
+    enabled: false
+    tier: free
+  local:
+    enabled: false
+
+virtual_models:
+  - name: auto-free
+    capabilities: [general]
+    tier: free
+    fallback_chain:
+      - mock-alpha-auto
+      - mock-beta-auto
+      - mock-gamma-auto
+
+custom_providers:
+  - name: mock-alpha
+    base_url: "http://mock-provider:5000/v1"
+    auth_type: none
+    tier: free
+    enabled: true
+    models: ["alpha-primary"]
+    capabilities: ["general"]
+    rpm: 100
+  - name: mock-beta
+    base_url: "http://mock-provider:5000/v1"
+    auth_type: none
+    tier: free
+    enabled: true
+    models: ["beta-secondary"]
+    capabilities: ["general"]
+    rpm: 100
+  - name: mock-gamma
+    base_url: "http://mock-provider:5000/v1"
+    auth_type: none
+    tier: free
+    enabled: true
+    models: ["gamma-lastresort"]
+    capabilities: ["general"]
+    rpm: 100
+
+litellm_settings:
+  cache: false

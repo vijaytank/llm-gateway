@@ -52,6 +52,8 @@ services:
         condition: service_healthy
     working_dir: /app
     environment:
+      # DATABASE_URL is safe here: one-shot container, no LiteLLM process to
+      # trigger Prisma schema resets.
       - DATABASE_URL=postgresql://llm_gateway:${POSTGRES_PASSWORD}@postgres:5432/llm_gateway
       - REDIS_URL=redis://redis:6379/0
     entrypoint: ["/bin/bash", "-c"]
@@ -85,17 +87,24 @@ services:
         required: false
     environment:
       - REDIS_URL=redis://redis:6379/0
-      - GATEWAY_CONFIG_PATH=/app/gateway_config.yaml
+      # Test-mode override: when GATEWAY_CONFIG_PATH points at the integration
+      # test config (set by the testing compose file), the gateway boots with
+      # mock custom providers. Default remains production config.
+      - GATEWAY_CONFIG_PATH=${GATEWAY_CONFIG_PATH:-/app/gateway_config.yaml}
       - LITELLM_CONFIG_PATH=/app/litellm_config.yaml
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
       - NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
       - GROQ_API_KEY=${GROQ_API_KEY:-}
       - CEREBRAS_API_KEY=${CEREBRAS_API_KEY:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
-      # NOTE: no DATABASE_URL here. LiteLLM's own Prisma layer is disabled —
-      # our CustomLogger callbacks handle Postgres logging; auth uses the
-      # master key from config (avoids "LiteLLM_VerificationTokenView does
-      # not exist" errors from an un-migrated Prisma schema).
+      # GATEWAY_DB_URL is for OUR callback/brain code (request_logs, aggregation).
+      # NOTE: deliberately NOT DATABASE_URL — a bare DATABASE_URL env makes LiteLLM
+      # enable its Prisma layer on boot, which resets the shared schema and wipes
+      # our alembic-managed tables.
+      # LiteLLM's own Prisma layer stays disabled (no litellm_settings.database_url
+      # in the generated config) — avoids "LiteLLM_VerificationTokenView does not
+      # exist" errors from an un-migrated Prisma schema.
+      - GATEWAY_DB_URL=postgresql://llm_gateway:${POSTGRES_PASSWORD}@postgres:5432/llm_gateway
     ports:
       - "4000:4000"
     volumes:
@@ -124,7 +133,7 @@ services:
     environment:
       - GATEWAY_BASE_URL=http://gateway:4000
       - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=postgresql://llm_gateway:${POSTGRES_PASSWORD}@postgres:5432/llm_gateway
+      - GATEWAY_DB_URL=postgresql://llm_gateway:${POSTGRES_PASSWORD}@postgres:5432/llm_gateway
     ports:
       - "4001:4001"
     networks:
@@ -154,7 +163,7 @@ services:
       - path: ../.env
         required: false
     environment:
-      - DATABASE_URL=postgresql://llm_gateway:${POSTGRES_PASSWORD}@postgres:5432/llm_gateway
+      - GATEWAY_DB_URL=postgresql://llm_gateway:${POSTGRES_PASSWORD}@postgres:5432/llm_gateway
       - REDIS_URL=redis://redis:6379/0
       - GATEWAY_CONFIG_PATH=/app/gateway_config.yaml
       - SESSION_SECRET=${SESSION_SECRET:-}
@@ -162,6 +171,37 @@ services:
       - "4002:4002"
     volumes:
       - ../gateway_config.yaml:/app/gateway_config.yaml
+    networks:
+      - internal
+
+  # ------------------------------------------------------------------
+  # Testing profile: scriptable OpenAI-compatible mock provider.
+  # Used only by tests/integration — never started by core/full profiles.
+  # Behavior is driven at runtime via Redis keys (mock:status:<model> etc.),
+  # so tests flip upstream health without restarting anything.
+  # ------------------------------------------------------------------
+  mock-provider:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gateway   # same image; runs our FastAPI mock
+    restart: "no"
+    profiles: ["testing"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["python", "tests/integration/mock_provider.py"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request as u; u.urlopen('http://localhost:5000/health', timeout=5)\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - MOCK_MODELS=alpha-primary,beta-secondary,gamma-lastresort
+      - MOCK_PROVIDER_PORT=5000
+    ports:
+      - "5000:5000"
     networks:
       - internal
 

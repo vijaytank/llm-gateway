@@ -23,9 +23,9 @@ sys.path.insert(0, str(ROOT))
 def _wait_for_postgres(timeout: int = 60) -> None:
     """Poll Postgres until reachable (bare-metal safety net; docker-compose
     already enforces service_healthy ordering)."""
-    url = os.environ.get("DATABASE_URL", "")
+    url = os.environ.get("GATEWAY_DB_URL") or os.environ.get("DATABASE_URL", "")
     if not url:
-        print("[main] DATABASE_URL not set; skipping postgres wait")
+        print("[main] GATEWAY_DB_URL/DATABASE_URL not set; skipping postgres wait")
         return
 
     import time
@@ -117,9 +117,8 @@ def main() -> int:
             print(f"[main] WARNING: startup health checks failed ({e}); continuing")
 
     # 4. Start LiteLLM proxy with custom callbacks
-    callbacks = os.environ.get(
-        "LITELLM_CUSTOM_CALLBACKS", "gateway.callbacks.custom_logger"
-    )
+    # Callbacks are wired via litellm_settings.callbacks in the generated
+    # config (see config_generator) — no env var needed here.
     port = os.environ.get("GATEWAY_PORT", "4000")
 
     cmd = [
@@ -130,8 +129,6 @@ def main() -> int:
     ]
     env = dict(os.environ)
     env.setdefault("LITELLM_MASTER_KEY", "")  # real key comes from .env via compose
-    if callbacks:
-        env["CUSTOM_CALLBACKS"] = callbacks
 
     print(f"[main] Starting LiteLLM on port {port}: {' '.join(cmd)}")
     return subprocess.call(cmd, env=env)

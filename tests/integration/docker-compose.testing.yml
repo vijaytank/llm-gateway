@@ -1,0 +1,41 @@
+# tests/integration/docker-compose.testing.yml — Compose overlay used ONLY by
+# the integration suite. It never runs in production:
+#
+#   cd docker
+#   docker compose -f docker-compose.yml -f ../tests/integration/docker-compose.testing.yml #       --profile full --profile testing up -d --build
+#
+# What it changes vs the base file:
+#   1. Gateway + UI boot with the test gateway config (mock custom providers)
+#      instead of the operator's gateway_config.yaml.
+#   2. The tests/ tree is bind-mounted read-only so the mock provider script
+#      is available inside its container.
+#   3. Startup health checks are skipped (they would probe real cloud APIs;
+#      with no keys they'd mark everything unhealthy before tests run).
+
+services:
+  gateway:
+    volumes:
+      - ../tests/integration/gateway_config.test.yaml:/app/gateway_config.yaml:ro
+      - ../tests:/app/tests:ro
+    environment:
+      # No real API keys in integration tests — skip the startup probe waves.
+      - SKIP_STARTUP_HEALTH_CHECKS=1
+
+  adapter:
+    volumes:
+      - ../tests/integration/gateway_config.test.yaml:/app/gateway_config.yaml
+    environment:
+      # Adapter needs the gateway master key to auth to the gateway on port 4000
+      - GATEWAY_API_KEY=${LITELLM_MASTER_KEY:-}
+
+  ui:
+    volumes:
+      - ../tests/integration/gateway_config.test.yaml:/app/gateway_config.yaml
+      - ../tests:/app/tests:ro
+
+  mock-provider:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gateway
+    volumes:
+      - ../tests:/app/tests:ro

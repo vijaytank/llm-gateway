@@ -342,15 +342,16 @@ def translate_openai_to_anthropic_response(
         ).model_dump()
     
     choice = choices[0]
-    message = choice.get("message", {})
+    message = choice.get("message") or {}
     finish_reason = choice.get("finish_reason", AnthropicStopReason.END_TURN)
     
     # Translate content
     content = message.get("content", "")
     role = message.get("role", "assistant")
     
-    # Translate tool calls if present
-    tool_calls = message.get("tool_calls", [])
+    # Translate tool calls if present (LiteLLM/OpenAI emit "tool_calls": null
+    # when absent — must not be iterated as a list)
+    tool_calls = message.get("tool_calls") or []
     anthropic_tool_calls = []
     for tc in tool_calls:
         anthropic_tool_calls.append({

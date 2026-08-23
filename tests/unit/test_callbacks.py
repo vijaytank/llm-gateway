@@ -34,7 +34,7 @@ def test_request_event_has_id():
 
 
 def test_success_event_stream_fields(logger, fake_redis):
-    logger.log_success_event(
+    logger.record_success(
         virtual_model="auto-free", actual_model="nvidia-auto", provider="nvidia",
         input_tokens=10, output_tokens=5, latency_ms=120, ttft_ms=40,
         request_metadata={"client": "test"}, response_metadata={},
@@ -50,7 +50,7 @@ def test_success_event_stream_fields(logger, fake_redis):
 
 
 def test_failure_event_includes_error_code(logger, fake_redis):
-    logger.log_failure_event(
+    logger.record_failure(
         virtual_model="auto-free", actual_model="nvidia-auto", provider="nvidia",
         error_code="429", error_type="rate_limit",
         latency_ms=50,
@@ -66,7 +66,7 @@ def test_failure_event_includes_error_code(logger, fake_redis):
 
 def test_callback_does_no_routing_logic(logger, fake_redis):
     """Callbacks must NOT touch routing state keys — that's the brain's job."""
-    logger.log_success_event(
+    logger.record_success(
         virtual_model="auto-free", actual_model="nvidia-auto", provider="nvidia",
         input_tokens=1, output_tokens=1, latency_ms=1, ttft_ms=1,
         request_metadata={}, response_metadata={},

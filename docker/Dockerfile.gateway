@@ -29,11 +29,13 @@ COPY wizard/ ./wizard/
 COPY scripts/ ./scripts/
 COPY alembic.ini ./
 COPY alembic/ ./alembic/
+COPY docker/supervisord.gateway.conf ./docker/
 
 ENV PYTHONUNBUFFERED=1
 
-# Default: run the gateway entrypoint (boot order → config gen → LiteLLM).
-# Compose overrides with `command:` for the ui service (uvicorn ui.app).
-CMD ["python", "-m", "gateway.main"]
+# Default: supervisord runs the gateway AND the routing brain as two
+# processes in this one container (plan Issue 9 — brain crash must not
+# kill the proxy). Compose overrides with `command:` for the ui service.
+CMD ["supervisord", "-c", "docker/supervisord.gateway.conf"]
 
 EXPOSE 4000 4002

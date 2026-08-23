@@ -28,7 +28,7 @@ HOURLY_STATS_RETENTION_DAYS = 30
 
 
 def _engine(dsn: str | None = None):
-    dsn = dsn or os.environ.get("DATABASE_URL", "postgresql://localhost/llm_gateway")
+    dsn = dsn or os.environ.get("GATEWAY_DB_URL") or os.environ.get("DATABASE_URL")
     return create_engine(dsn)
 
 

@@ -57,8 +57,10 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 # ---------------------------------------------------------------------------
 
 def _database_url() -> str:
-    """Resolve at call time so tests/deployments can repoint DATABASE_URL."""
-    return os.environ.get("DATABASE_URL", os.environ.get("GATEWAY_DB_URL", ""))
+    """Resolve at call time so tests/deployments can repoint DATABASE_URL.
+    GATEWAY_DB_URL is preferred (DATABASE_URL in a LiteLLM process enables
+    its Prisma layer, which resets the shared schema)."""
+    return os.environ.get("GATEWAY_DB_URL") or os.environ.get("DATABASE_URL", "")
 
 
 _engine = None
