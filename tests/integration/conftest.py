@@ -19,6 +19,7 @@ containers production runs.
 """
 
 import json
+import os
 import subprocess
 import time
 import urllib.error
@@ -37,6 +38,19 @@ COMPOSE_BASE = [
 PROFILES = ["--profile", "full", "--profile", "testing"]
 
 GATEWAY_URL = "http://localhost:4000"
+
+# Master key for host-side calls to the gateway (docker/.env is the same source
+# compose uses, so tests and containers never drift).
+def _load_master_key() -> str:
+    env_file = PROJECT_ROOT / "docker" / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            if line.startswith("LITELLM_MASTER_KEY="):
+                return line.split("=", 1)[1].strip()
+    return os.environ.get("LITELLM_MASTER_KEY", "")
+
+MASTER_KEY = _load_master_key()
+AUTH_HEADERS = {"Authorization": f"Bearer {MASTER_KEY}"} if MASTER_KEY else {}
 ADAPTER_URL = "http://localhost:4001"
 UI_URL = "http://localhost:4002"
 MOCK_URL = "http://localhost:5000"
@@ -97,17 +111,26 @@ def http_json(method: str, url: str, payload=None, headers=None, timeout=30):
         return e.code, e.read().decode()
 
 
-def http_raw(method: str, url: str, payload=None, headers=None, timeout=30):
-    """Returns (status, headers, body-bytes) — for SSE / cookie inspection."""
+def http_raw(method: str, url: str, payload=None, headers=None, timeout=30,
+             follow_redirects=False):
+    """Returns (status, headers, body-bytes) — for SSE / cookie inspection.
+    Redirects are NOT followed by default so callers see the 3xx itself."""
     data = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
     if data is not None:
         req.add_header("Content-Type", "application/json")
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, hdrs, newurl):
+            return None
+
+    handlers = [] if follow_redirects else [_NoRedirect()]
+    opener = urllib.request.build_opener(*handlers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, dict(resp.headers), resp.read()
+        with opener.open(req, timeout=timeout) as resp:
+            return resp.status, {k.title(): v for k, v in resp.headers.items()}, resp.read()
     except urllib.error.HTTPError as e:
-        return e.code, dict(e.headers), e.read()
+        return e.code, {k.title(): v for k, v in e.headers.items()}, e.read()
 
 
 def gateway_chat(model="auto-free", messages=None, timeout=60, extra=None):
@@ -118,7 +141,8 @@ def gateway_chat(model="auto-free", messages=None, timeout=60, extra=None):
     }
     if extra:
         payload.update(extra)
-    return http_json("POST", f"{GATEWAY_URL}/v1/chat/completions", payload, timeout=timeout)
+    return http_json("POST", f"{GATEWAY_URL}/v1/chat/completions", payload,
+                     headers=dict(AUTH_HEADERS), timeout=timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -127,13 +151,10 @@ def gateway_chat(model="auto-free", messages=None, timeout=60, extra=None):
 
 def pg_query(sql: str, params=None, fetch="all"):
     """Run SQL inside the postgres container. fetch: all|one|none."""
-    flag = {"all": "-c", "one": "-t -A -c", "none": "-c"}[fetch]
+    flag = {"all": "-t -A -c", "one": "-t -A -c", "none": "-c"}[fetch]
     args = ["docker", "compose", "exec", "-T", "postgres",
             "psql", "-U", "llm_gateway", "-d", "llm_gateway"]
-    if fetch == "one":
-        args += ["-t", "-A", "-c", sql]
-    else:
-        args += ["-c", sql]
+    args += ["-t", "-A", "-c", sql] if fetch != "none" else ["-c", sql]
     result = _run(args, timeout=60)
     if fetch == "one":
         return result.stdout.strip()
@@ -157,6 +178,11 @@ def redis_cmd(*args):
         return out
 
 
+def redis_eval(script: str, *keys):
+    """Run a Lua script via EVAL — batches many operations into one exec call."""
+    return redis_cmd("--raw", "eval", script, str(len(keys)), *keys)
+
+
 def mock_set_status(model: str, status):
     """Script the mock upstream for a model: 200/429/500/503/'timeout'."""
     if status is None:
@@ -166,11 +192,18 @@ def mock_set_status(model: str, status):
 
 
 def mock_reset():
-    """Clear all scripting keys so every test starts from a healthy mock."""
-    for pattern in ("mock:status:*", "mock:latency_ms:*", "mock:request_count:*", "mock:content"):
-        for key in redis_cmd("keys", pattern) or []:
-            if isinstance(key, str):
-                redis_cmd("del", key)
+    """Clear all scripting + brain state keys in ONE round-trip (fast)."""
+    redis_eval("""
+        local n = 0
+        for _, pattern in ipairs({'mock:status:*', 'mock:latency_ms:*', 'mock:request_count:*', 'mock:content', 'gateway:model:*', 'gateway:offline*', 'gateway:connectivity:*'}) do
+            local keys = redis.call('keys', pattern)
+            for _, k in ipairs(keys) do
+                redis.call('del', k)
+                n = n + 1
+            end
+        end
+        return tostring(n)
+    """)
 
 
 def mock_request_count(model: str) -> int:
@@ -276,8 +309,4 @@ def _clean_routing_state(docker_stack):
     """Before each test: reset mock scripting + brain state keys so tests are
     order-independent. Runs only for integration tests (this conftest's dir)."""
     mock_reset()
-    for pattern in ("gateway:model:*", "gateway:offline*", "gateway:connectivity:*"):
-        for key in redis_cmd("keys", pattern) or []:
-            if isinstance(key, str):
-                redis_cmd("del", key)
     yield

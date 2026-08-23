@@ -59,7 +59,8 @@ BUILTIN_MODELS = [
 
 def seed_model_registry(database_url: str = None) -> dict:
     """Upsert built-in models into model_registry. Returns a status dict."""
-    url = database_url or os.environ.get("DATABASE_URL")
+    url = (database_url or os.environ.get("GATEWAY_DB_URL")
+           or os.environ.get("DATABASE_URL"))
     if not url:
         return {"status": "error", "message": "DATABASE_URL not set"}
 

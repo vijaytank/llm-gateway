@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from conftest import gateway_chat, redis_cmd, wait_until  # noqa: E402
+from conftest import gateway_chat, redis_cmd, redis_eval, wait_until  # noqa: E402
 
 
 def _score(model):
@@ -40,20 +40,21 @@ def test_higher_success_rate_yields_higher_score():
     """Success-heavy model outscores failure-heavy model — formula behavior
     verified end-to-end through the brain's stream consumption."""
     winner, loser = "score-winner", "score-loser"
-    for _ in range(6):
-        redis_cmd(
-            "xadd", "gateway:requests:stream", "*",
-            "virtual_model", "auto-free", "actual_model", winner,
-            "provider", "mock-alpha", "status", "success",
-            "latency_ms", "100",
-        )
-    for _ in range(6):
-        redis_cmd(
-            "xadd", "gateway:requests:stream", "*",
-            "virtual_model", "auto-free", "actual_model", loser,
-            "provider", "mock-beta", "status", "failure",
-            "error_code", "500", "error_type", "server_error",
-        )
+    # One round-trip: batch all 12 stream events in a single EVAL.
+    redis_eval("""
+        for i = 1, 6 do
+            redis.call('xadd', 'gateway:requests:stream', '*',
+                'virtual_model', 'auto-free', 'actual_model', 'score-winner',
+                'provider', 'mock-alpha', 'status', 'success', 'latency_ms', '100')
+        end
+        for i = 1, 6 do
+            redis.call('xadd', 'gateway:requests:stream', '*',
+                'virtual_model', 'auto-free', 'actual_model', 'score-loser',
+                'provider', 'mock-beta', 'status', 'error',
+                'error_code', '500', 'error_type', 'server_error')
+        end
+        return 'ok'
+    """)
 
     def _both():
         return _score(winner) is not None and _score(loser) is not None
@@ -66,13 +67,16 @@ def test_higher_success_rate_yields_higher_score():
 def test_rolling_window_capped_at_moving_avg_window():
     """Latency window list never exceeds moving_avg_window (50)."""
     model = "window-model"
-    for i in range(60):
-        redis_cmd(
-            "xadd", "gateway:requests:stream", "*",
-            "virtual_model", "auto-free", "actual_model", model,
-            "provider", "mock-alpha", "status", "success",
-            "latency_ms", str(100 + i),
-        )
+    # One round-trip: batch all 60 events in a single EVAL.
+    redis_eval("""
+        for i = 1, 60 do
+            redis.call('xadd', 'gateway:requests:stream', '*',
+                'virtual_model', 'auto-free', 'actual_model', 'window-model',
+                'provider', 'mock-alpha', 'status', 'success',
+                'latency_ms', tostring(100 + i))
+        end
+        return 'ok'
+    """)
 
     def _capped():
         length = redis_cmd("llen", f"gateway:model:{model}:latency_window")

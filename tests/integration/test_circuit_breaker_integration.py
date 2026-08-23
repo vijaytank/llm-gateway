@@ -52,14 +52,18 @@ def test_circuit_opens_after_threshold_failures():
     # Drive the LIVE brain's state machine through the same Redis it uses,
     # by publishing failure events to the request stream exactly like the
     # gateway callback does.
-    for _ in range(3):
+    for i in range(3):
         redis_cmd(
             "xadd", "gateway:requests:stream", "*",
-            "event_id", "it-cb-1",
+            "event_id", f"it-cb-{i}",
             "virtual_model", "auto-free",
             "actual_model", cb_model,
             "provider", "mock-alpha",
-            "status", "failure",
+            # NOTE: brain's stream consumer treats anything that is not
+            # "success" as failure for scoring, but the circuit-breaker path
+            # only fires on status == "error" — the same value the gateway
+            # callback publishes on failure (callbacks.record_failure).
+            "status", "error",
             "error_code", "503",
             "error_type", "server_error",
         )

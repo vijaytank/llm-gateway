@@ -12,7 +12,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from conftest import (  # noqa: E402
-    compose, gateway_chat, pg_query, wait_until,
+    compose, gateway_chat, pg_query, service_health, wait_service_healthy,
+    wait_until,
 )
 
 
@@ -24,7 +25,7 @@ def test_request_logs_survive_gateway_restart(docker_stack):
     # Generate traffic so there is definitely data
     for _ in range(2):
         gateway_chat(timeout=60)
-    wait_until(lambda: _count_rows() >= 1, timeout=30, desc='rows before restart')(lambda: _count_rows() >= 1, timeout=30, desc="rows before restart")
+    wait_until(lambda: _count_rows() >= 1, timeout=30, desc="rows before restart")
     before = _count_rows()
     registry_before = int(pg_query("SELECT COUNT(*) FROM model_registry", fetch="one"))
 

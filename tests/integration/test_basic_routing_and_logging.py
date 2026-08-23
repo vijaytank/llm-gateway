@@ -17,7 +17,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from conftest import (  # noqa: E402
-    GATEWAY_URL, gateway_chat, http_json, pg_query, redis_cmd, wait_until,
+    AUTH_HEADERS, GATEWAY_URL, gateway_chat, http_json, pg_query, redis_cmd,
+    wait_until,
 )
 
 
@@ -43,7 +44,7 @@ def test_streaming_returns_valid_sse_chunks():
     req = urllib.request.Request(
         f"{GATEWAY_URL}/v1/chat/completions",
         data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **AUTH_HEADERS},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=60) as resp:

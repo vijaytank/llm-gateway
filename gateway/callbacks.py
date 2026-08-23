@@ -280,15 +280,23 @@ class CustomLogger(_LiteLLMCustomLogger):
     # into the domain methods above so routing code stays framework-free.
     # ------------------------------------------------------------------
 
-    def _model_info(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    def _model_info(self, kwargs: Dict[str, Any], response_obj: Any = None) -> Dict[str, Any]:
         kwargs = kwargs or {}
         model_obj = kwargs.get("litellm_params") or {}
         model_info = getattr(model_obj, "model_info", None) or (
             model_obj.get("model_info") if isinstance(model_obj, dict) else None) or {}
         metadata = kwargs.get("litellm_metadata") or kwargs.get("metadata") or {}
+        # Actual deployed model: prefer the concrete deployment string; the
+        # proxy's model_info.model_name is the virtual group, not the upstream.
         actual = None
-        if isinstance(model_info, dict):
-            actual = model_info.get("model_name")
+        resp_model = getattr(response_obj, "model", None)
+        if isinstance(resp_model, str) and resp_model:
+            actual = resp_model.split("/")[-1]
+        if not actual:
+            lp_model = getattr(model_obj, "model", None) or (
+                model_obj.get("model") if isinstance(model_obj, dict) else None)
+            if isinstance(lp_model, str) and lp_model:
+                actual = lp_model.split("/")[-1]
         return {
             "virtual_model": kwargs.get("model") or metadata.get("model_group") or "",
             "actual_model": actual or "",
@@ -304,7 +312,7 @@ class CustomLogger(_LiteLLMCustomLogger):
         return 0
 
     def _on_success(self, kwargs, response_obj, start_time, end_time) -> None:
-        info = self._model_info(kwargs)
+        info = self._model_info(kwargs, response_obj=response_obj)
         usage = getattr(response_obj, "usage", None)
         self.record_success(
             virtual_model=info["virtual_model"],

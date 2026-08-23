@@ -49,27 +49,18 @@ def test_seeded_models_enabled_and_tiered():
 def test_seed_is_idempotent():
     """Re-running the seeder (as db-init does on every deploy) never dupes."""
     before = len(_registry_rows())
+    # The gateway container intentionally has GATEWAY_DB_URL, not DATABASE_URL
+    # (a bare DATABASE_URL makes LiteLLM enable its Prisma layer and wipe our
+    # alembic tables). Seed with no-arg call — seeder falls back to env itself.
     out = compose_output(
         "exec", "-T", "gateway",
         "python", "-c",
         "import sys; sys.path.insert(0, '/app'); "
         "from scripts.seed_model_registry import seed_model_registry; "
-        "import os; print(seed_model_registry(os.environ['DATABASE_URL'].replace('***', __import__('os').environ.get('PGPASSWORD_FROM_ENV',''))))",
+        "print(seed_model_registry())",
         timeout=120,
     )
-    # Run via the gateway container where DATABASE_URL is already correct.
-    # The exec above may fail on env plumbing; fall back to direct re-exec of
-    # the seed script inside the container.
-    if "status" not in out:
-        out = compose_output(
-            "exec", "-T", "gateway",
-            "bash", "-c",
-            "cd /app && DATABASE_URL=$DATABASE_URL python -c \""
-            "import os; from scripts.seed_model_registry import seed_model_registry; "
-            "print(seed_model_registry())\"",
-            timeout=120,
-        )
-    assert '"status"' in out and ("seeded" in out or "updated" in out), \
+    assert "'status'" in out and ("seeded" in out or "updated" in out), \
         f"unexpected seeder output: {out[-500:]}"
     after = len(_registry_rows())
     assert after == before, f"re-seed changed row count {before} -> {after} (not idempotent)"

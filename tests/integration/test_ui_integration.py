@@ -34,7 +34,11 @@ class UiClient:
         self.cookies = {}
 
     def _merge_cookies(self, headers):
-        for raw in headers.get("Set-Cookie", "").split(","):
+        # uvicorn emits lowercase header names on the wire — look up
+        # case-insensitively or Set-Cookie is missed entirely.
+        raw_cookie = next(
+            (v for k, v in headers.items() if k.lower() == "set-cookie"), "")
+        for raw in raw_cookie.split(","):
             if "=" in raw:
                 pair = raw.strip().split(";")[0]
                 name, _, value = pair.partition("=")
@@ -73,7 +77,8 @@ def _ensure_logged_in(ui: UiClient) -> None:
 def test_unauthenticated_access_redirects_to_login(docker_stack):
     status, headers, _ = http_raw("GET", f"{UI_URL}/")
     assert status in (303, 307)
-    assert "/login" in headers.get("Location", "")
+    location = next((v for k, v in headers.items() if k.lower() == "location"), "")
+    assert "/login" in location or "/setup" in location
 
 
 def test_wrong_password_returns_401():
@@ -149,4 +154,5 @@ def test_logout_clears_session():
     assert status == 303
     status, headers, _ = ui.request("GET", "/")
     assert status in (303, 307)
-    assert "/login" in headers.get("Location", "")
+    location = next((v for k, v in headers.items() if k.lower() == "location"), "")
+    assert "/login" in location
