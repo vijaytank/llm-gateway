@@ -93,6 +93,16 @@ def get_redis():
     return redis_lib.from_url(redis_url, decode_responses=True)
 
 
+# Phase 5 security: shared login rate limiter (5 failures/min → 429).
+from ui.rate_limit import LoginRateLimiter, client_ip_from_request  # noqa: E402
+
+_login_limiter = LoginRateLimiter(redis_client=get_redis())
+
+
+def _login_limiter_client_ip(request: Request) -> str:
+    return client_ip_from_request(request)
+
+
 def new_db_session():
     """Initialize the engine if needed and return a fresh DB session."""
     get_engine()
@@ -188,14 +198,24 @@ def login_page(request: Request):
 
 @app.post("/login")
 def login_submit(request: Request, password: str = Form(...)):
+    # Phase 5 security: rate-limit login attempts (5 failures/min → 429).
+    client_ip = _login_limiter_client_ip(request)
+    if not _login_limiter.check_allowed(client_ip):
+        return templates.TemplateResponse(
+            request, "login.html",
+            {"error": "Too many login attempts. Try again in a minute."},
+            status_code=429,
+        )
     db = new_db_session()
     try:
         if not ui_auth.authenticate(db, password):
-            # Phase 5 will add rate limiting here; wrong password → 401 shape
+            # Phase 5: failed attempt feeds the sliding-window limiter.
+            _login_limiter.record_failure(client_ip)
             return templates.TemplateResponse(
                 request, "login.html", {"error": "Invalid password."},
                 status_code=401,
             )
+        _login_limiter.reset(client_ip)
         token = ui_auth.create_session_token()
         resp = RedirectResponse(url="/", status_code=303)
         resp.set_cookie(

@@ -15,6 +15,12 @@ CIRCUIT_BREAKER_WINDOW_SECONDS = 300   # 5 minutes
 CIRCUIT_BREAKER_COOLDOWN_429 = 600     # 10 min for rate limit
 CIRCUIT_BREAKER_COOLDOWN_5XX = 1800    # 30 min for server error
 CIRCUIT_BREAKER_COOLDOWN_AUTH = 86400  # 24 h for 401/403 (needs human fix)
+HALF_OPEN_PROBE_INTERVAL_S = 30        # Phase 5: ≤1 probe per interval in half-open
+
+# Phase 5: provider-level circuit breaker
+PROVIDER_CIRCUIT_MODEL_THRESHOLD = 3   # models opening circuits within window...
+PROVIDER_CIRCUIT_WINDOW_SECONDS = 300  # ...within this window → provider flagged
+PROVIDER_CIRCUIT_LOW_PRIORITY_S = 1800 # provider deprioritized for 30 minutes
 
 # Score weights (must sum to 1.0)
 SCORE_WEIGHT_SUCCESS_RATE = 0.40

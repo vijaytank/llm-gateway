@@ -189,7 +189,26 @@ class StreamReader:
             
             # Dispatch to circuit breaker manager
             self._update_circuit_breaker(event)
-            
+
+            # Phase 5: feed Prometheus counters/gauges (never blocks).
+            metrics = getattr(self, "metrics", None)
+            if metrics is not None:
+                try:
+                    metrics.observe_request(
+                        model=event.actual_model or event.virtual_model,
+                        provider=event.provider or "unknown",
+                        status=event.status,
+                        latency_ms=event.latency_ms,
+                    )
+                    metrics.set_circuit_state(
+                        event.actual_model or event.virtual_model,
+                        self.cb_manager.get_state(
+                            event.actual_model or event.virtual_model)
+                        if hasattr(self, "cb_manager") else "closed",
+                    )
+                except Exception as me:
+                    print(f"[metrics] update failed: {me}")
+
             # Automatic connectivity error accounting (Phase 3): failures from
             # cloud providers that classify as connection failures feed the
             # connectivity monitor's offline-detection window.
@@ -359,7 +378,15 @@ class StreamReader:
             else:
                 # Other transient errors: increment failure count (5xx path)
                 cb.record_failure(model_name, is_429=False)
-                
+
+            # Phase 5: if this model's circuit just opened, feed provider-level
+            # accounting — 3+ models opening within 5 min deprioritizes the
+            # whole provider (no full circuit trip on remaining models).
+            if cb.get_state(model_name) == "open":
+                from brain.provider_circuit import ProviderCircuitManager
+                ProviderCircuitManager(self.redis).record_model_circuit_open(
+                    event.provider or "", model_name)
+
         except Exception as e:
             print(f"Error updating circuit breaker for model {model_name}: {e}")
     

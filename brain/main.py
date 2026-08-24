@@ -17,6 +17,8 @@ import os
 import sys
 from pathlib import Path
 
+from aiohttp import web  # metrics HTTP server (Phase 5)
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -60,6 +62,20 @@ async def amain() -> None:
     monitor = ConnectivityMonitor(redis_client=client)
     agg_scheduler = start_aggregator_scheduler()
 
+    # Phase 5: Prometheus metrics exporter on its own port.
+    metrics_runner = None
+    try:
+        from brain.metrics import GatewayMetrics, start_metrics_server, get_metrics_port
+        metrics = GatewayMetrics()
+        reader.metrics = metrics  # stream events feed counters/gauges
+        metrics_runner = start_metrics_server(metrics, get_metrics_port())
+        await metrics_runner.setup()
+        site = web.TCPSite(metrics_runner, "0.0.0.0", get_metrics_port())
+        await site.start()
+        print(f"[brain] /metrics serving on port {get_metrics_port()}")
+    except Exception as e:
+        print(f"[brain] metrics exporter unavailable ({e}); continuing without")
+
     # Run stream consumption, health scheduling, and connectivity monitoring
     # concurrently on one loop. StreamReader.start() is a blocking loop — push
     # it to a worker thread.
@@ -72,6 +88,8 @@ async def amain() -> None:
     finally:
         if agg_scheduler is not None:
             agg_scheduler.shutdown(wait=False)
+        if metrics_runner is not None:
+            await metrics_runner.cleanup()
 
 
 def main() -> int:

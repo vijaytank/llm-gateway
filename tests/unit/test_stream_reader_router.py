@@ -117,8 +117,12 @@ def test_hook_half_open_is_zero_score(fake_redis):
     cb = CircuitBreakerManager(fake_redis)
     cb._set_state("m-half", "half_open", ttl=600)
     hook = _hook(fake_redis)
+    # Phase 5: first caller acquires the (throttled) probe slot.
     influence, reason = hook.influence_model_selection("m-half", ["m-half"])
-    assert influence == 0 and reason == "circuit_half_open"
+    assert influence == 0 and reason == "circuit_half_open_probe"
+    # Second caller within the interval is throttled — still routable at 0.
+    influence2, reason2 = hook.influence_model_selection("m-half", ["m-half"])
+    assert influence2 == 0 and reason2 == "circuit_half_open_throttled"
 
 
 def test_hook_uses_redis_score_as_sort_key(fake_redis):

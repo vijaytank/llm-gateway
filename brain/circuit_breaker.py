@@ -24,6 +24,7 @@ from brain.config import (
     CIRCUIT_BREAKER_COOLDOWN_429,
     CIRCUIT_BREAKER_COOLDOWN_5XX,
     CIRCUIT_BREAKER_COOLDOWN_AUTH,
+    HALF_OPEN_PROBE_INTERVAL_S,
 )
 
 
@@ -248,11 +249,11 @@ class CircuitBreakerManager:
     
     def check_half_open_probe_allowed(self, model_name: str) -> bool:
         """Check if a half-open probe is allowed for this model.
-        
+
         Returns True if:
         - State is half_open AND
         - The cooldown TTL has NOT yet expired (probe is still within its window)
-        
+
         Returns False if:
         - State is not half_open, OR
         - The cooldown TTL has expired (it's time to close the circuit)
@@ -260,7 +261,7 @@ class CircuitBreakerManager:
         state = self.get_state(model_name)
         if state != "half_open":
             return False
-        
+
         # Check if the half-open cooldown TTL has expired
         # The half_open state was set with a cooldown TTL
         circuit_key = self._circuit_key(model_name)
@@ -268,5 +269,38 @@ class CircuitBreakerManager:
             ttl = self.redis.ttl(circuit_key)
             # If TTL <= 0, the cooldown has expired → should close the circuit
             return ttl > 0
-        
+
         return False
+
+    def _probe_throttle_key(self, model_name: str) -> str:
+        """Redis key for the half-open probe throttle lock."""
+        return f"gateway:model:{model_name}:half_open_probe_lock"
+
+    def try_acquire_half_open_probe(self, model_name: str,
+                                    interval_seconds: int = HALF_OPEN_PROBE_INTERVAL_S) -> bool:
+        """Phase 5 refinement: throttle half-open probes to 1 per interval.
+
+        Prevents the thundering-herd problem on recovery: when a circuit is
+        half-open, at most ONE request per interval_seconds may pass through
+        to the recovering model. Every other request must route to fallbacks.
+
+        Uses a Redis SET NX EX lock — atomic across brain/router processes.
+        Returns True if this caller won the probe slot; False otherwise.
+        """
+        state = self.get_state(model_name)
+        if state != "half_open":
+            # Closed: always allowed; Open: caller excludes before asking.
+            return True
+        if not self.redis:
+            return True  # fail-open without Redis (matches fail-safe design)
+
+        key = self._probe_throttle_key(model_name)
+        acquired = self.redis.set(key, "1", nx=True, ex=int(interval_seconds))
+        # redis-py returns True on success, None/False when the key existed.
+        return bool(acquired)
+
+    def release_half_open_probe(self, model_name: str) -> None:
+        """Release the half-open probe lock early (e.g. after probe result)."""
+        if not self.redis:
+            return
+        self.redis.delete(self._probe_throttle_key(model_name))

@@ -64,6 +64,12 @@ def _wait_for_redis(timeout: int = 60) -> None:
 def main() -> int:
     print("[main] === LLM Gateway boot sequence ===")
 
+    # 0. Security check: .env must not be group/world readable (Issue 12).
+    #    Windows skips this (POSIX modes don't apply) — never blocks boot.
+    from gateway.env_security import check_env_permissions
+    env_path = os.environ.get("GATEWAY_ENV_PATH", ".env")
+    check_env_permissions(env_path)
+
     # 1. Wait for backing services (Issue 2: explicit boot order)
     _wait_for_postgres()
     _wait_for_redis()

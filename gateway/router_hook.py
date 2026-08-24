@@ -20,6 +20,7 @@ from typing import Dict, Any, List, Optional, Tuple
 import redis
 
 from brain.circuit_breaker import CircuitBreakerManager
+from brain.provider_circuit import ProviderCircuitManager
 from brain.connectivity_monitor import ConnectivityMonitor, OFFLINE_KEY
 from brain.scorer import compute_score
 from schemas.config import GatewayConfig, RoutingDefaults
@@ -53,6 +54,7 @@ class RouterHook:
         )
         self.gateway_config = gateway_config or self._load_config()
         self.cb_manager = CircuitBreakerManager(self.redis)
+        self.provider_circuit = ProviderCircuitManager(self.redis)
         self.defaults = self.gateway_config.routing_defaults
         # Phase 3 AC: local.enabled=false must prevent ANY local model from
         # being used, even during total cloud outages (plan test_local_disabled).
@@ -149,8 +151,13 @@ class RouterHook:
                 return -1, "circuit_open"
             
             if circuit_state == "half_open":
-                # Half-open — last resort, score = 0
-                return 0, "circuit_half_open"
+                # Phase 5 refinement: half-open probes are throttled to 1 per
+                # HALF_OPEN_PROBE_INTERVAL_S (thundering-herd protection). The
+                # first caller acquires the probe slot; everyone else routes
+                # as last-resort fallback without touching the model.
+                if self.cb_manager.try_acquire_half_open_probe(model_name):
+                    return 0, "circuit_half_open_probe"
+                return 0, "circuit_half_open_throttled"
             
             # 2. Check if we have a score in Redis
             score_key = f"gateway:model:{model_name}:score"
@@ -185,18 +192,28 @@ class RouterHook:
                     redis_score = 0.5
             
             # 4. Return the influence score with reason
+            # Phase 5: a provider flagged low-priority (3+ model circuits
+            # opened within 5 min) gets its models demoted — still routable
+            # (never excluded) but ranked below healthy providers' models.
             if redis_score >= 0.8:
-                return int(redis_score * 10), "high_score"
+                base = int(redis_score * 10)
             elif redis_score >= 0.6:
-                return int(redis_score * 10), "good_score"
+                base = int(redis_score * 10)
             elif redis_score >= 0.4:
-                return int(redis_score * 10), "average_score"
+                base = int(redis_score * 10)
             elif redis_score >= 0.2:
-                return int(redis_score * 10), "low_score"
+                base = int(redis_score * 10)
             elif redis_score >= 0:
-                return int(redis_score * 10), "very_low_score"
+                base = int(redis_score * 10)
             else:
                 return -1, "circuit_excluded_or_negative"
+
+            if provider and self.provider_circuit.get_priority(provider) == "low":
+                # Demote but keep routable: cap influence below average.
+                return 1, "provider_low_priority"
+
+            return base, "high_score" if base >= 6 else (
+                "good_score" if base >= 3 else "average_score")
             
         except Exception as e:
             # Fail-safe: if anything goes wrong (e.g. Redis unreachable), keep
