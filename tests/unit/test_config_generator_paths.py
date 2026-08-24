@@ -23,7 +23,9 @@ def test_registry_models_empty_without_db(monkeypatch):
 def test_generated_config_includes_routing_strategy():
     cfg = create_default_config()
     out = cg.generate_litellm_config(cfg)
-    assert out["router_settings"]["routing_strategy"] == "latency-based-routing-v2"
+    # v1 strategy: litellm 1.70's -v2 variant rejects deployments carrying
+    # custom model_info keys (verified live — see review follow-up).
+    assert out["router_settings"]["routing_strategy"] == "latency-based-routing"
     # Callback registration present (F-H1 wiring)
     assert "gateway.callbacks.custom_logger" in out["litellm_settings"]["callbacks"]
 
