@@ -144,17 +144,23 @@ def apply_retention(session: Session) -> dict[str, int]:
 
 
 def run_aggregation(dsn: str | None = None) -> dict:
-    """One aggregation tick: previous full hour + midnight daily rollup + retention."""
+    """One aggregation tick: previous full hour + daily rollup + retention.
+
+    Daily rollup (review F-L8): instead of firing only when a tick lands in
+    the first minutes of midnight UTC (a missed tick silently skipped the
+    day), we roll up whenever the previous hour is the LAST hour of a finished
+    day — and re-run the previous day if it has no complete rollup yet.
+    """
     now = datetime.now(timezone.utc)
     prev_hour = (now - timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
 
     engine = _engine(dsn)
     with Session(engine) as session:
         hourly_rows = aggregate_hour(session, prev_hour)
-        # Daily rollup only at midnight UTC (covers the finished previous day)
         written_daily = 0
-        if now.hour == 0 and now.minute < 5:
-            written_daily = aggregate_day(session, now - timedelta(days=1))
+        # Finished-day boundary: prev_hour 23:00 means its day just ended.
+        if prev_hour.hour == 23:
+            written_daily = aggregate_day(session, prev_hour)
         retention = apply_retention(session)
         session.commit()
     return {"prev_hour": prev_hour.isoformat(), "hourly_rows": hourly_rows,

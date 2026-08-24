@@ -75,9 +75,10 @@ def test_local_disabled_influence_excludes_even_online():
 def test_local_disabled_chain_reorder_drops_locals():
     h = make_hook(make_redis(offline=True), disabled_local_config())
     ordered = h.get_fallback_priority("auto-free", CHAIN_WITH_LOCAL)
-    # All models excluded while offline+disabled; locals sink to the end.
-    assert ordered[-1] == "local-llama3-8b"
-    assert ordered[0] == "nvidia-auto" or ordered[0].startswith("nvidia")
+    # Review F-M14 semantics: with local disabled + offline, EVERY model is
+    # excluded (cloud by offline, local by config) → the routable chain is
+    # empty so callers respond 503 all_free_models_exhausted (plan AC).
+    assert ordered == []
 
 
 def test_local_enabled_still_works():

@@ -1,7 +1,7 @@
 meta:
   schema_version: '1.0'
 general_settings:
-  master_key: sk-litellm-B8TxGEC0m0NEPK2ZhW6xiZUSwuwcbp7ooDZZcU0URkM
+  master_key: "REPLACE_ME__set_LITELLM_MASTER_KEY_in_docker_dot_env"
   database_url: ${GATEWAY_DB_URL}
   redis_url: ${GATEWAY_REDIS_URL}
   background_health_checks: true

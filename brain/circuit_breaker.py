@@ -27,6 +27,13 @@ from brain.config import (
     HALF_OPEN_PROBE_INTERVAL_S,
 )
 
+# Canonical cooldown-type key suffixes (single source of truth — used by
+# _set_cooldown, _has_recent_auth_error and transition_to_closed alike).
+COOLDOWN_RATE_LIMIT = "rate_limit"
+COOLDOWN_SERVER_ERROR = "server_error"
+COOLDOWN_AUTH = "auth"
+ALL_COOLDOWN_TYPES = (COOLDOWN_RATE_LIMIT, COOLDOWN_SERVER_ERROR, COOLDOWN_AUTH)
+
 
 class CircuitBreakerManager:
     """
@@ -137,17 +144,13 @@ class CircuitBreakerManager:
         # Get current state
         current_state = self.get_state(model_name)
         
-        if current_state == "open":
-            # Open → half_open after cooldown TTL has elapsed
-            # We set half_open state with a cooldown TTL
-            cooldown = self._get_cooldown_duration(model_name)
-            self._set_state(model_name, "half_open", ttl=cooldown)
-            
-        elif current_state == "half_open":
+        if current_state == "half_open":
             # Half_open → closed on success
             self._set_state(model_name, "closed")
-            
-        # If closed, stay closed (no action needed)
+        
+        # While open: a success does NOT transition to half_open — half-open is
+        # entered only when the cooldown TTL expires (plan Phase 2 d3). Ignore
+        # successes in the open state; if closed, stay closed (no action).
     
     def record_auth_failure(self, model_name: str) -> None:
         """
@@ -163,7 +166,7 @@ class CircuitBreakerManager:
 
         # Open the circuit directly with the auth cooldown.
         self._set_state(model_name, "open", ttl=CIRCUIT_BREAKER_COOLDOWN_AUTH)
-        self._set_cooldown(model_name, "auth", CIRCUIT_BREAKER_COOLDOWN_AUTH)
+        self._set_cooldown(model_name, COOLDOWN_AUTH, CIRCUIT_BREAKER_COOLDOWN_AUTH)
         self._reset_failures(model_name)
 
     def record_failure(self, model_name: str, is_429: bool = False) -> None:
@@ -194,13 +197,13 @@ class CircuitBreakerManager:
         # Determine cooldown based on error type
         if is_429:
             cooldown_seconds = CIRCUIT_BREAKER_COOLDOWN_429
-            error_type = "rate_limit"
+            error_type = COOLDOWN_RATE_LIMIT
         elif current_state == "open" and self._has_recent_auth_error(model_name):
             cooldown_seconds = CIRCUIT_BREAKER_COOLDOWN_AUTH
-            error_type = "auth"
+            error_type = COOLDOWN_AUTH
         else:
             cooldown_seconds = CIRCUIT_BREAKER_COOLDOWN_5XX
-            error_type = "server_error"
+            error_type = COOLDOWN_SERVER_ERROR
         
         # Check if we've hit the failure threshold to open the circuit
         if failure_count >= CIRCUIT_BREAKER_FAILURE_COUNT:
@@ -242,9 +245,9 @@ class CircuitBreakerManager:
         
         self._set_state(model_name, "closed")
         self._reset_failures(model_name)
-        # Remove any cooldown timers
+        # Remove any cooldown timers (canonical key suffixes)
         if self.redis:
-            for ctype in ["429", "5xx", "auth"]:
+            for ctype in ALL_COOLDOWN_TYPES:
                 self.redis.delete(self._cooldown_key(model_name, ctype))
     
     def check_half_open_probe_allowed(self, model_name: str) -> bool:

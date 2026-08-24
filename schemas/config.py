@@ -94,6 +94,21 @@ class CustomProviderConfig(BaseModel):
             )
         return v
 
+    @field_validator("models")
+    @classmethod
+    def validate_models(cls, v: list, info) -> list:
+        # Sentinel placeholders used transiently during UI probing must NEVER
+        # reach a persisted config or a LiteLLM deployment (review F-M7).
+        for m in v:
+            if isinstance(m, str) and m.startswith("__"):
+                raise ValueError(
+                    f"placeholder model '{m}' cannot be persisted; resolve real "
+                    "model names via discovery or manual entry first"
+                )
+        if not v:
+            raise ValueError("at least one model name is required")
+        return v
+
     @field_validator("base_url")
     @classmethod
     def validate_base_url(cls, v: str) -> str:

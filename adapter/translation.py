@@ -54,7 +54,6 @@ class AnthropicRequest(BaseModel):
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None
     stream: bool = False
-    temperature: Optional[float] = None
 
 
 class OAIMessage(BaseModel):
@@ -74,7 +73,7 @@ class OAIChoice(BaseModel):
 
 class OAIStreamChunk(BaseModel):
     """Represents an OpenAI stream chunk."""
-    id: str = "chatcmpl-123"
+    id: str = ""
     object: str = "chat.completion.chunk"
     created: int = 0
     model: str = ""
@@ -275,7 +274,7 @@ def translate_anthropic_to_openai_request(
             # Multimodal content: list of typed parts
             content_list = ([{"type": "text", "text": t} for t in text_parts if t]
                             + image_parts)
-            body["content"] = content_list[0] if False else content_list
+            body["content"] = content_list
         else:
             body["content"] = "\n".join(t for t in text_parts if t) or None
 
@@ -286,7 +285,7 @@ def translate_anthropic_to_openai_request(
     oai_request = {
         "model": anthropic_request.model or "auto-free",
         "messages": (
-            [m.dict(exclude_unset=True) for m in system_messages]
+            [m.model_dump(exclude_unset=True) for m in system_messages]
             + [m for m in oai_messages]
         ),
         "max_tokens": anthropic_request.max_tokens or 4096,

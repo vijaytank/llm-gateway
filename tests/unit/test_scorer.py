@@ -25,8 +25,8 @@ def test_score_within_valid_range(fake_redis):
 
 
 def test_all_success_low_latency_scores_high(fake_redis):
-    fake_redis.hset("gateway:model:fast-good:stats",
-                    mapping={"successes": 20, "failures": 0})
+    fake_redis.rpush("gateway:model:fast-good:outcome_window", *(["1"] * 20))
+    fake_redis.hset("gateway:model:fast-good:limits", mapping={"rpm": 100})
     s = scorer.compute_score("fast-good", latency_ms=0)
     assert s == pytest.approx(1.0, abs=0.01)
 
@@ -69,8 +69,35 @@ def test_formula_matches_issue5_documented_vectors(fake_redis):
         (0.55, 12000, 20, 80),  # middling
     ]
     for i, (sr, lat, used, limit) in enumerate(vectors):
-        fake_redis.hset(f"gateway:model:v{i}:stats", mapping={
-            "successes": int(sr * 100), "failures": int((1 - sr) * 100),
-            "used": used, "limit": limit})
+        # New contract: rolling outcome window (last N outcomes; compute_score
+        # defaults to window_size=50) + live RPM counter vs seeded limit.
+        n = 50
+        outcomes = ["1"] * round(sr * n) + ["0"] * (n - round(sr * n))
+        fake_redis.rpush(f"gateway:model:v{i}:outcome_window", *outcomes)
+        if used:
+            fake_redis.set(f"gateway:model:v{i}:quota:rpm", used)
+        fake_redis.hset(f"gateway:model:v{i}:limits", mapping={"rpm": limit})
         s = scorer.compute_score(f"v{i}", latency_ms=lat)
         assert s == pytest.approx(formula(sr, lat, used, limit), abs=0.02), f"vector {i}"
+
+
+def test_fresh_failure_not_masked_by_history(fake_redis):
+    """Regression (review F-M4): recent failures must move the score even when
+    long history is all-success (rolling window, not cumulative counters)."""
+    r = fake_redis
+    r.rpush("gateway:model:flappy:outcome_window", *(["1"] * 50))
+    good = scorer.compute_score("flappy", latency_ms=200)
+    r.rpush("gateway:model:flappy:outcome_window", *(["0"] * 20))
+    degraded = scorer.compute_score("flappy", latency_ms=200)
+    assert degraded < good - 0.05
+
+
+def test_quota_exhaustion_lowers_headroom_term(fake_redis):
+    """Regression (review F-M5): live RPM counter feeds quota headroom."""
+    r = fake_redis
+    r.rpush("gateway:model:busy:outcome_window", *(["1"] * 30))
+    r.hset("gateway:model:busy:limits", mapping={"rpm": 10})
+    fresh = scorer.compute_score("busy", latency_ms=200)
+    r.set("gateway:model:busy:quota:rpm", 10)  # fully exhausted this minute
+    exhausted = scorer.compute_score("busy", latency_ms=200)
+    assert exhausted < fresh

@@ -2,13 +2,22 @@
 #
 # Build context is the PROJECT ROOT (compose sets context: ..), so paths
 # here are project-root relative.
+#
+# Review F-M13: pins below MUST match requirements.txt exactly. The full
+# requirements file is intentionally not installed here to keep this image
+# slim (no litellm/brain/UI deps are needed by the adapter).
 FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir fastapi==0.115.0 "uvicorn[standard]==0.32.0" \
-    pydantic==2.9.0 httpx==0.27.0 python-dotenv==1.0.1
+COPY requirements.txt ./
+# Extract the shared pins from the single source of truth so they can't drift.
+RUN pip install --no-cache-dir \
+    fastapi==$(grep -E '^fastapi==' requirements.txt | cut -d= -f3) \
+    "uvicorn[standard]==$(grep -E '^uvicorn' requirements.txt | cut -d= -f3)" \
+    pydantic==$(grep -E '^pydantic==' requirements.txt | cut -d= -f3) \
+    httpx==$(grep -E '^httpx==' requirements.txt | cut -d= -f3) \
+    python-dotenv==$(grep -E '^python-dotenv==' requirements.txt | cut -d= -f3)
 
 COPY adapter/ ./adapter/
 COPY schemas/ ./schemas/

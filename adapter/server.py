@@ -4,26 +4,26 @@ adapter/server.py — FastAPI Anthropic Inbound Adapter server
 Minimal FastAPI service that:
 - Sits on port 4001
 - Handles Anthropic /v1/messages → OpenAI format → gateway port 4000
-- Translates response back to Anthropic format
-- Supports streaming translation
+- Translates response back to Anthropic format (JSON and SSE streaming,
+  branched on the request's own `stream` flag per plan Issue 3)
 - Provides health check endpoint
+
+Error responses use Anthropic-style envelopes; internal exception detail is
+logged server-side only (never echoed to clients).
 """
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-import asyncio
+from fastapi.responses import JSONResponse, StreamingResponse
 import json
 import logging
 import os
 
 import httpx
 
-from adapter.schemas import AnthropicMessageRequest, AnthropicMessageResponse
+from adapter.schemas import AnthropicMessageRequest
 from adapter.translation import (
     translate_anthropic_to_openai_request,
     translate_openai_to_anthropic_response,
-    translate_anthropic_stream_to_openai,
     translate_stop_reason_from_openai,
 )
 
@@ -34,30 +34,33 @@ logger = logging.getLogger(__name__)
 # Global gateway base URL — configurable, never hardcoded (plan DoD).
 GATEWAY_BASE_URL = os.environ.get("GATEWAY_BASE_URL", "http://localhost:4000")
 
+# Injectable client factory (unit tests substitute this to stub the gateway;
+# production uses a fresh httpx.AsyncClient per call).
+def _new_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient()
+
 app = FastAPI(
     title="Anthropic Inbound Adapter",
     description="Translates Anthropic Messages API requests to OpenAI format and vice versa",
-    version="1.0.0",
+    version="1.1.0",
 )
 
-# Named router so adapter/__init__ (and tests) can reference the routes
+# Named router so adapter/__init__ (and tests) can reference the routes.
 router = app.router
 
-# Add CORS middleware for development
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+def _anthropic_error(status_code: int, err_type: str, message: str) -> JSONResponse:
+    """Anthropic-style error envelope. Internal detail stays in logs only."""
+    return JSONResponse(
+        status_code=status_code,
+        content={"type": "error", "error": {"type": err_type, "message": message}},
+    )
 
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    return {"status": "healthy", "service": "anthropic-adapter", "version": "1.0.0"}
-
+    return {"status": "healthy", "service": "anthropic-adapter", "version": "1.1.0"}
 
 
 def _forward_headers(request_headers=None) -> dict:
@@ -85,192 +88,120 @@ def _forward_headers(request_headers=None) -> dict:
     return headers
 
 
+async def _stream_gateway_to_anthropic(oai_request: dict, headers: dict):
+    """Forward a streaming request to the gateway and yield Anthropic SSE events.
+
+    Owns its httpx client/stream INSIDE the generator: Starlette starts
+    consuming after the handler returns, so the context managers must live
+    here (httpx.StreamClosed otherwise).
+    """
+    async with _new_client() as client:
+        async with client.stream(
+            "POST",
+            f"{GATEWAY_BASE_URL}/v1/chat/completions",
+            json=oai_request,
+            headers=headers,
+            timeout=60.0,
+        ) as gateway_response:
+            # Persistent translation state across the whole stream.
+            msg_state = {"message_started": False, "text_started": False}
+            block_index = 0
+            buffer = ""
+
+            def _sse(event_type: str, payload: dict) -> str:
+                return f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+
+            async for raw_chunk in gateway_response.aiter_text():
+                if not raw_chunk:
+                    continue
+                buffer += raw_chunk
+                # Parse complete SSE frames ("data: ...\n") out of the buffer
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line[5:].strip()
+                    if data_str == "[DONE]":
+                        continue
+                    try:
+                        chunk = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        logger.warning("Non-JSON SSE data: %s", data_str[:120])
+                        continue
+
+                    choices = chunk.get("choices") or []
+                    delta = (choices[0].get("delta") or {}) if choices else {}
+                    finish_reason = choices[0].get("finish_reason") if choices else None
+
+                    if not msg_state["message_started"]:
+                        yield _sse("message_start", {
+                            "type": "message_start",
+                            "message": {"role": "assistant", "content": []},
+                        })
+                        msg_state["message_started"] = True
+
+                    content = delta.get("content")
+                    if content:
+                        if not msg_state["text_started"]:
+                            yield _sse("content_block_start", {
+                                "type": "content_block_start",
+                                "index": block_index,
+                                "content_block": {"type": "text", "text": ""},
+                            })
+                            msg_state["text_started"] = True
+                        yield _sse("content_block_delta", {
+                            "type": "content_block_delta",
+                            "index": block_index,
+                            "delta": {"type": "text_delta", "text": content},
+                        })
+
+                    if finish_reason:
+                        stop_reason = translate_stop_reason_from_openai(finish_reason)
+                        yield _sse("message_delta", {
+                            "type": "message_delta",
+                            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+                        })
+                        yield _sse("message_stop", {"type": "message_stop"})
+
+
 @app.post("/v1/messages")
-async def anthropic_messages(
-    request: AnthropicMessageRequest,
-    raw_request: Request,
-):
+async def anthropic_messages(request: AnthropicMessageRequest, raw_request: Request):
     """
     Handle Anthropic /v1/messages POST.
 
     Translates Anthropic request shape to OpenAI chat/completions format,
-    forwards to gateway, then translates response back to Anthropic format.
+    forwards to the gateway, then translates back to Anthropic format.
+    Streaming requests (`"stream": true` in the body — what every Anthropic
+    SDK client sends) get an SSE response; non-streaming get plain JSON.
     """
-    try:
-        # Step 1: Translate Anthropic request to OpenAI format
-        oai_request = translate_anthropic_to_openai_request(request.dict())
+    oai_request = translate_anthropic_to_openai_request(request.model_dump())
+    headers = _forward_headers(raw_request.headers)
 
-        # Step 2: Forward to gateway using httpx (with auth headers)
-        async with httpx.AsyncClient() as client:
+    try:
+        if request.stream:
+            return StreamingResponse(
+                _stream_gateway_to_anthropic(oai_request, headers),
+                media_type="text/event-stream",
+            )
+
+        async with _new_client() as client:
             response = await client.post(
                 f"{GATEWAY_BASE_URL}/v1/chat/completions",
                 json=oai_request,
-                headers=_forward_headers(raw_request.headers),
+                headers=headers,
                 timeout=60.0,
             )
-        
-        # Step 3: Translate OpenAI response back to Anthropic format
-        anth_response = translate_openai_to_anthropic_response(response.json())
-        
-        # Step 4: Return Anthropic-formatted response
-        return anth_response
-        
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Gateway request timed out")
-    except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="Cannot connect to gateway")
     except Exception as e:
-        logger.error(f"Error translating Anthropic request: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("gateway call failed: %s: %s", e.__class__.__name__, e)
+        status = 504 if isinstance(e, httpx.TimeoutException) else (
+            503 if isinstance(e, httpx.ConnectError) else 500)
+        raise HTTPException(status_code=status,
+                            detail="upstream gateway failure") from e
 
-
-async def stream_anthropic_to_openai(
-    anthropic_events: list,
-) -> StreamingResponse:
-    """
-    Stream Anthropic events translated to OpenAI format.
-    
-    This enables streaming from Anthropic SDK clients through the gateway.
-    """
-    async def event_generator():
-        oai_events = translate_anthropic_stream_to_openai(anthropic_events)
-        for event in oai_events:
-            yield f"data: {json.dumps(event)}\n\n"
-    
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-    )
-
-
-@app.post("/v1/messages/stream")
-async def anthropic_messages_stream(
-    request: AnthropicMessageRequest,
-    raw_request: Request,
-):
-    """
-    Handle Anthropic /v1/messages/stream POST with streaming.
-    
-    Translates Anthropic streaming events to OpenAI format and streams back.
-    """
-    try:
-        # Step 1: Translate Anthropic request to OpenAI format
-        oai_request = translate_anthropic_to_openai_request(request.dict())
-        
-        # Step 2: Forward to gateway
-        async def event_stream():
-            # Own the httpx client/stream INSIDE the generator: Starlette only
-            # starts consuming this iterator after the handler returns, so the
-            # `async with` must not live in the handler body (the connection
-            # would already be closed -> httpx.StreamClosed on first read).
-            async with httpx.AsyncClient() as client:
-                async with client.stream(
-                    "POST",
-                    f"{GATEWAY_BASE_URL}/v1/chat/completions",
-                    json=oai_request,
-                    headers=_forward_headers(raw_request.headers),
-                    timeout=60.0,
-                ) as gateway_response:
-                    # Persistent translation state across the whole stream.
-                    msg_state = {"message_started": False, "text_started": False}
-                    block_index = 0
-                    buffer = ""
-
-                    def _sse(event_type: str, payload: dict) -> str:
-                        return f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
-
-                    async for raw_chunk in gateway_response.aiter_text():
-                        if not raw_chunk:
-                            continue
-                        buffer += raw_chunk
-                        # Parse complete SSE frames ("data: ...\n\n") out of the buffer
-                        while "\n" in buffer:
-                            line, buffer = buffer.split("\n", 1)
-                            line = line.strip()
-                            if not line.startswith("data:"):
-                                continue
-                            data_str = line[5:].strip()
-                            if data_str == "[DONE]":
-                                continue
-                            try:
-                                chunk = json.loads(data_str)
-                            except json.JSONDecodeError:
-                                logger.warning(f"Non-JSON SSE data: {data_str[:120]}")
-                                continue
-
-                            choices = chunk.get("choices") or []
-                            delta = (choices[0].get("delta") or {}) if choices else {}
-                            finish_reason = choices[0].get("finish_reason") if choices else None
-
-                            if not msg_state["message_started"]:
-                                yield _sse("message_start", {
-                                    "type": "message_start",
-                                    "message": {"role": "assistant", "content": []},
-                                })
-                                msg_state["message_started"] = True
-
-                            content = delta.get("content")
-                            if content:
-                                if not msg_state["text_started"]:
-                                    yield _sse("content_block_start", {
-                                        "type": "content_block_start",
-                                        "index": block_index,
-                                        "content_block": {"type": "text", "text": ""},
-                                    })
-                                    msg_state["text_started"] = True
-                                yield _sse("content_block_delta", {
-                                    "type": "content_block_delta",
-                                    "index": block_index,
-                                    "delta": {"type": "text_delta", "text": content},
-                                })
-
-                            if finish_reason:
-                                stop_reason = translate_stop_reason_from_openai(finish_reason)
-                                yield _sse("message_delta", {
-                                    "type": "message_delta",
-                                    "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-                                })
-                                yield _sse("message_stop", {"type": "message_stop"})
-
-        return StreamingResponse(
-                    event_stream(),
-                    media_type="text/event-stream",
-                )
-        
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="Gateway request timed out")
-    except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail="Cannot connect to gateway")
-    except Exception as e:
-        logger.error(f"Error in streaming: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/v1/chat/completions")
-async def openai_chat_completions(request: Request):
-    """
-    Pass-through endpoint for OpenAI-format requests.
-    
-    Accepts OpenAI chat completions requests and forwards them to the
-    main gateway on port 4000. This allows the adapter to also serve
-    as a pass-through for direct OpenAI SDK calls.
-    """
-    body = await request.json()
-    
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{GATEWAY_BASE_URL}/v1/chat/completions",
-                json=body,
-                headers=_forward_headers(request.headers),
-                timeout=60.0,
-            )
-        
-        return response.json()
-    
-    except Exception as e:
-        logger.error(f"Error forwarding OpenAI request: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    # Non-streaming: translate the OpenAI JSON response back to Anthropic shape.
+    anth_response = translate_openai_to_anthropic_response(response.json())
+    return anth_response
 
 
 if __name__ == "__main__":

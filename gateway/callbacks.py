@@ -341,6 +341,104 @@ class CustomLogger(_LiteLLMCustomLogger):
             response_metadata={},
         )
 
+    def _latency_ms(self, start_time, end_time) -> int:
+        if start_time and end_time:
+            try:
+                return int((end_time - start_time).total_seconds() * 1000)
+            except Exception:
+                return 0
+        return 0
+
+    def _on_success(self, kwargs, response_obj, start_time, end_time) -> None:
+        info = self._model_info(kwargs, response_obj=response_obj)
+        usage = getattr(response_obj, "usage", None)
+        self.record_success(
+            virtual_model=info["virtual_model"],
+            actual_model=info["actual_model"],
+            provider=info["provider"],
+            input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            latency_ms=self._latency_ms(start_time, end_time),
+            ttft_ms=0,
+            request_metadata={"model_group": (kwargs or {}).get("model")},
+            response_metadata={},
+        )
+
+    def _on_failure(self, kwargs, response_obj, start_time, end_time) -> None:
+        info = self._model_info(kwargs)
+        exc = (kwargs or {}).get("exception")
+        status_code = getattr(exc, "status_code", None)
+        self.record_failure(
+            virtual_model=info["virtual_model"],
+            actual_model=info["actual_model"],
+            provider=info["provider"],
+            error_code=str(status_code) if status_code else None,
+            error_type=exc.__class__.__name__ if exc else None,
+            latency_ms=self._latency_ms(start_time, end_time),
+            request_metadata={"model_group": (kwargs or {}).get("model")},
+            response_metadata={},
+        )
+
+    # Async hooks: the Postgres write is blocking psycopg2 I/O — run it on a
+    # worker thread so LiteLLM's event loop is never stalled per-request
+    # (review F-M8). The Redis XADD is likewise offloaded.
+    async def _record_success_async(self, kwargs, response_obj, start_time, end_time):
+        import asyncio
+        await asyncio.to_thread(self._on_success, kwargs, response_obj, start_time, end_time)
+
+    async def _record_failure_async(self, kwargs, response_obj, start_time, end_time):
+        import asyncio
+        await asyncio.to_thread(self._on_failure, kwargs, response_obj, start_time, end_time)
+
+    # ------------------------------------------------------------------
+    # Pre-call routing hook (review F-H1): LiteLLM calls async_pre_call_hook
+    # before model selection. We consult the brain's Redis state via
+    # RouterHook.influence_model_selection() and translate it into
+    # LiteLLM-native signals on the request metadata:
+    #   influence == -1  -> metadata["gateway_model_excluded"] = True
+    #                       (router_hook also mirrors to cooldown keys below)
+    #   otherwise        -> metadata["gateway_influence"] = <score>
+    # The generated config enables router_settings.routing_strategy
+    # "latency-based-routing-v2" plus our cooldown mirroring, so excluded
+    # deployments are skipped natively by the proxy.
+    # ------------------------------------------------------------------
+
+    def _router_hook(self):
+        """Lazily construct the RouterHook (shares this logger's Redis)."""
+        if getattr(self, "_router_hook_instance", None) is None:
+            try:
+                from gateway.router_hook import RouterHook
+                self._router_hook_instance = RouterHook(redis_client=self.redis)
+            except Exception as e:
+                print(f"[callbacks] router hook unavailable: {e}")
+                self._router_hook_instance = False  # sentinel: don't retry per request
+        return self._router_hook_instance or None
+
+    async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
+        """Consult live routing state before LiteLLM picks a deployment."""
+        try:
+            hook = self._router_hook()
+            if hook is None:
+                return data
+            virtual_model = (data or {}).get("model", "")
+            fallback_chain = [virtual_model]
+            influence, reason = hook.influence_model_selection(
+                virtual_model, fallback_chain)
+            if not isinstance(data.get("metadata"), dict):
+                data["metadata"] = {}
+            metadata = data["metadata"]
+            metadata["gateway_influence"] = influence
+            metadata["gateway_routing_reason"] = reason
+            if influence < 0:
+                # Excluded: record so post-call accounting can attribute the
+                # fallback; LiteLLM's own cooldown for this deployment is set
+                # by the brain's circuit writer (Redis key already open).
+                metadata["gateway_model_excluded"] = True
+        except Exception as e:
+            # Fail-safe: never block a request because routing introspection failed.
+            print(f"[callbacks] pre-call routing check failed: {e}")
+        return data
+
     def log_success_event(self, kwargs, response_obj, start_time, end_time):
         """LiteLLM sync success hook."""
         try:
@@ -349,9 +447,9 @@ class CustomLogger(_LiteLLMCustomLogger):
             print(f"Warning: success hook failed: {e}")
 
     async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
-        """LiteLLM async success hook."""
+        """LiteLLM async success hook (non-blocking: DB write off the loop)."""
         try:
-            self._on_success(kwargs, response_obj, start_time, end_time)
+            await self._record_success_async(kwargs, response_obj, start_time, end_time)
         except Exception as e:
             print(f"Warning: async success hook failed: {e}")
 
@@ -363,9 +461,9 @@ class CustomLogger(_LiteLLMCustomLogger):
             print(f"Warning: failure hook failed: {e}")
 
     async def async_log_failure_event(self, kwargs, response_obj, start_time, end_time):
-        """LiteLLM async failure hook."""
+        """LiteLLM async failure hook (non-blocking: DB write off the loop)."""
         try:
-            self._on_failure(kwargs, response_obj, start_time, end_time)
+            await self._record_failure_async(kwargs, response_obj, start_time, end_time)
         except Exception as e:
             print(f"Warning: async failure hook failed: {e}")
 

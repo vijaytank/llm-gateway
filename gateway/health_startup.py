@@ -118,9 +118,13 @@ def classify_response(status_code: int, body: Optional[dict]) -> str:
     Returns classification string.
     """
     if status_code == 200:
-        # Even 200 with zero usage might mean model loaded but empty response
-        # We treat 200 with valid body as healthy
-        if body and body.get("usage", {}).get("prompt_tokens", 0) == 0 and body.get("usage", {}).get("completion_tokens", 0) == 0:
+        # Zero-usage body (model loaded but empty response): treat as slow,
+        # but ONLY when an explicit usage object is present. A plain 200
+        # without usage data is healthy (review: previously ANY 200 without
+        # usage matched this branch and was misclassified "slow").
+        usage = (body or {}).get("usage") or {}
+        if isinstance(usage, dict) and usage.get("prompt_tokens") == 0 \
+           and usage.get("completion_tokens") == 0 and usage:
             return "slow"  # Loaded but empty — not unhealthy, just slow
         return "healthy"
     
@@ -222,16 +226,19 @@ async def probe_provider(
         )
 
 
-async def run_wave_1(
+async def _run_wave(
     client: httpx.AsyncClient,
     providers: List[Dict[str, Any]],
     redis_client: redis.Redis,
+    label: str,
 ) -> Dict[str, str]:
+    """Probe every provider in the given list and persist status to Redis.
+
+    Single parameterized implementation (review F-L3 — replaces the three
+    verbatim copies run_wave_1/2/3). The wave partition is expressed by the
+    caller passing only the providers belonging to that wave.
     """
-    Wave 1: 0-30s after startup — critical providers only.
-    Checks NVIDIA and Groq (primary free providers).
-    """
-    print("=== Wave 1: Checking critical providers (NVIDIA, Groq) ===")
+    print(f"=== {label} ===")
     results = {}
     
     for provider in providers:
@@ -267,94 +274,20 @@ async def run_wave_1(
     return results
 
 
-async def run_wave_2(
-    client: httpx.AsyncClient,
-    providers: List[Dict[str, Any]],
-    redis_client: redis.Redis,
-) -> Dict[str, str]:
-    """
-    Wave 2: 30-60s after startup — secondary providers.
-    Checks Cerebras and OpenRouter.
-    """
-    print("=== Wave 2: Checking secondary providers (Cerebras, OpenRouter) ===")
-    results = {}
-    
-    for provider in providers:
-        name = provider.get("name", "unknown")
-        base_url = provider.get("base_url", "")
-        
-        if not base_url:
-            continue
-        
-        probe_result = await probe_provider(client, base_url, name)
-        
-        # Write status to Redis
-        status_key = f"gateway:model:{name}:status"
-        ttl = 7200
-        
-        if probe_result.healthy:
-            redis_client.setex(status_key, ttl, "healthy")
-            results[name] = "healthy"
-            print(f"  {name}: HEALTHY")
-        elif probe_result.classification == "rate_limited":
-            redis_client.setex(status_key, ttl, "rate_limited")
-            results[name] = "rate_limited"
-            print(f"  {name}: RATE_LIMITED")
-        elif probe_result.classification == "unauthorized":
-            redis_client.setex(status_key, ttl, "unauthorized")
-            results[name] = "unauthorized"
-            print(f"  {name}: UNAUTHORIZED")
-        else:
-            redis_client.setex(status_key, ttl, "unhealthy")
-            results[name] = "unhealthy"
-            print(f"  {name}: UNHEALTHY ({probe_result.classification})")
-    
-    return results
+# Wave membership per plan: wave 1 critical (NVIDIA, Groq), wave 2 secondary
+# (Cerebras, OpenRouter), wave 3 anything remaining.
+_WAVE_MEMBERSHIP = {
+    1: {"nvidia", "groq"},
+    2: {"cerebras", "openrouter"},
+}
 
 
-async def run_wave_3(
-    client: httpx.AsyncClient,
-    providers: List[Dict[str, Any]],
-    redis_client: redis.Redis,
-) -> Dict[str, str]:
-    """
-    Wave 3: 60-120s after startup — all remaining providers.
-    Checks any providers not covered in waves 1-2.
-    """
-    print("=== Wave 3: Checking all remaining providers ===")
-    results = {}
-    
-    for provider in providers:
-        name = provider.get("name", "unknown")
-        base_url = provider.get("base_url", "")
-        
-        if not base_url:
-            continue
-        
-        probe_result = await probe_provider(client, base_url, name)
-        
-        # Write status to Redis
-        status_key = f"gateway:model:{name}:status"
-        ttl = 7200
-        
-        if probe_result.healthy:
-            redis_client.setex(status_key, ttl, "healthy")
-            results[name] = "healthy"
-            print(f"  {name}: HEALTHY")
-        elif probe_result.classification == "rate_limited":
-            redis_client.setex(status_key, ttl, "rate_limited")
-            results[name] = "rate_limited"
-            print(f"  {name}: RATE_LIMITED")
-        elif probe_result.classification == "unauthorized":
-            redis_client.setex(status_key, ttl, "unauthorized")
-            results[name] = "unauthorized"
-            print(f"  {name}: UNAUTHORIZED")
-        else:
-            redis_client.setex(status_key, ttl, "unhealthy")
-            results[name] = "unhealthy"
-            print(f"  {name}: UNHEALTHY ({probe_result.classification})")
-    
-    return results
+def _providers_for_wave(providers: List[Dict[str, Any]], wave: int) -> List[Dict[str, Any]]:
+    if wave == 3:
+        assigned = _WAVE_MEMBERSHIP[1] | _WAVE_MEMBERSHIP[2]
+        return [p for p in providers if p.get("name") not in assigned]
+    members = _WAVE_MEMBERSHIP.get(wave, set())
+    return [p for p in providers if p.get("name") in members]
 
 
 def determine_wave_at_time(elapsed_seconds: int) -> int:
@@ -387,11 +320,15 @@ async def run_health_checks(
     """
     start_time = time.time()
     
+    results: Dict[str, str] = {}
+    
     async with httpx.AsyncClient() as client:
-        # Wave 1: 0-30s
-        wave1_results = await run_wave_1(client, providers, redis_client)
+        # Wave 1: critical providers (0-30s)
+        wave1_providers = _providers_for_wave(providers, 1)
+        if wave1_providers:
+            results.update(await _run_wave(client, wave1_providers, redis_client, "Wave 1 (0-30s): critical providers"))
         
-        # Wait for wave 1 to complete, then wave 2
+        # Stagger before wave 2
         elapsed = time.time() - start_time
         wave = determine_wave_at_time(int(elapsed))
         
@@ -402,12 +339,12 @@ async def run_health_checks(
                 print(f"  Pausing {wait_time}s before Wave 2...")
                 await asyncio.sleep(min(wait_time, 5))  # Cap at 5s in test
         
-        # Wave 2: 30-60s
-        wave2_results = await run_wave_2(client, providers, redis_client)
-        wave1_results = wave1_results or {}
-        wave1_results.update(wave2_results)
+        # Wave 2: secondary providers (30-60s)
+        wave2_providers = _providers_for_wave(providers, 2)
+        if wave2_providers:
+            results.update(await _run_wave(client, wave2_providers, redis_client, "Wave 2 (30-60s): secondary providers"))
         
-        # Wait for wave 2 to complete, then wave 3
+        # Stagger before wave 3
         elapsed = time.time() - start_time
         wave = determine_wave_at_time(int(elapsed))
         
@@ -417,21 +354,18 @@ async def run_health_checks(
                 print(f"  Pausing {wait_time}s before Wave 3...")
                 await asyncio.sleep(min(wait_time, 5))
         
-        # Wave 3: 60-120s
-        wave3_results = await run_wave_3(client, providers, redis_client)
-        wave1_results = wave1_results or {}
-        wave1_results.update(wave3_results)
+        # Wave 3: all remaining providers (60-120s)
+        wave3_providers = _providers_for_wave(providers, 3)
+        if wave3_providers:
+            results.update(await _run_wave(client, wave3_providers, redis_client, "Wave 3 (60-120s): remaining providers"))
     
     total_elapsed = time.time() - start_time
     print(f"\n=== Health checks complete in {total_elapsed:.1f}s ===")
-    healthy_count = len([v for v in wave1_results.values() if v == "healthy"])
-    print(f"  Wave 1 (0-30s): {healthy_count} healthy")
-    # Count newly healthy in waves 2 and 3
-    wave2_3_healthy = len([v for k, v in wave1_results.items() if v == "healthy"]) - healthy_count
-    print(f"  Wave 2+3 (30-120s): {wave2_3_healthy} healthy (newly)")
-    print(f"  Total: {len(wave1_results)} providers probed")
+    healthy_count = len([v for v in results.values() if v == "healthy"])
+    print(f"  Healthy after full sequence: {healthy_count}")
+    print(f"  Total: {len(results)} providers probed")
     
-    return wave1_results
+    return results
 
 
 # For CLI usage

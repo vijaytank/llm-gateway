@@ -151,7 +151,6 @@ def gateway_chat(model="auto-free", messages=None, timeout=60, extra=None):
 
 def pg_query(sql: str, params=None, fetch="all"):
     """Run SQL inside the postgres container. fetch: all|one|none."""
-    flag = {"all": "-t -A -c", "one": "-t -A -c", "none": "-c"}[fetch]
     args = ["docker", "compose", "exec", "-T", "postgres",
             "psql", "-U", "llm_gateway", "-d", "llm_gateway"]
     args += ["-t", "-A", "-c", sql] if fetch != "none" else ["-c", sql]

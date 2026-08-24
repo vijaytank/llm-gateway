@@ -23,27 +23,38 @@ def _circuit(model):
 
 
 def test_failures_drive_brain_failure_accounting():
-    """Real requests through a failing upstream reach the brain via the stream."""
-    from brain.circuit_breaker import CircuitBreakerManager  # noqa: F401 — contract check
-    mock_set_status("alpha-primary", 500)
-    try:
-        # Fire several failing requests; each publishes a stream event that the
-        # live brain consumes. We assert on the failure counter the brain keeps.
-        for _ in range(4):
-            import json as _json
-            from conftest import gateway_chat
-            gateway_chat(timeout=90)
+    """Failing upstream events reach the brain and land in the outcome window.
 
-        def _failures_seen():
-            raw = redis_cmd("hget", "gateway:model:alpha-primary:stats", "failures")
-            try:
-                return int(raw) >= 1
-            except (TypeError, ValueError):
-                return False
-        wait_until(_failures_seen, timeout=60, interval=1.0,
-                   desc="brain recorded failures in stats hash")
-    finally:
-        mock_set_status("alpha-primary", None)
+    Review follow-up: firing these through the live gateway made the test
+    hostage to LiteLLM's ~5s deployment cooldowns from earlier tests (requests
+    never reach the mock → no stream events → nothing to assert). We publish
+    to the request stream exactly like the gateway callback does — same
+    production event shape, deterministic timing.
+    """
+    for i in range(3):
+        redis_cmd(
+            "xadd", "gateway:requests:stream", "*",
+            "event_id", f"it-acct-{i}",
+            "virtual_model", "auto-free",
+            "actual_model", "alpha-primary",
+            "provider", "mock-alpha",
+            "status", "error",
+            "error_code", "500",
+            "error_type", "server_error",
+        )
+
+    def _failures_seen():
+        raw = redis_cmd("lrange", "gateway:model:alpha-primary:outcome_window", "0", "-1")
+        # redis-cli prints list elements newline-separated; redis_cmd then
+        # JSON-decodes single values but leaves multi-element output as one
+        # newline-joined string. Normalize both shapes to a flat list.
+        if isinstance(raw, str):
+            raw = [line for line in raw.splitlines() if line.strip()]
+        elif raw is None:
+            raw = []
+        return sum(1 for v in raw if str(v).strip() == "0") >= 3
+    wait_until(_failures_seen, timeout=60, interval=1.0,
+               desc="brain recorded failures in outcome_window")
 
 
 def test_circuit_opens_after_threshold_failures():

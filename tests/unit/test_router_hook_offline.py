@@ -103,9 +103,10 @@ def test_offline_chain_reorder_puts_locals_first():
     h = make_hook(make_redis(offline=True, scores={"local-llama3-8b": 0.7}))
     ordered = h.get_fallback_priority("auto-free", CHAIN)
     assert ordered[0].startswith("local-")
-    # All cloud models still present after locals
-    rest = ordered[1:]
-    assert set(rest) == {"nvidia-auto", "groq-auto-free", "openrouter-free"}
+    # Review F-M14 semantics: offline-excluded cloud models are DROPPED, not
+    # appended at the tail (plan docstring: an offline chain with no locals
+    # yields no routable entries so callers respond 503).
+    assert set(ordered) == {"local-llama3-8b"}
 
 
 def test_redis_down_fail_open_not_offline():

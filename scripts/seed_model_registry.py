@@ -79,6 +79,11 @@ def seed_model_registry(database_url: str = None) -> dict:
                 .one_or_none()
             )
             if existing is None:
+                extra = {}
+                if spec.get("warn_on_charge_risk"):
+                    # Persisted in the JSONB `extra` column (review F-M6):
+                    # feeds UI charge-risk warnings for OpenRouter free tiers.
+                    extra["warn_on_charge_risk"] = True
                 session.add(ModelRegistry(
                     id=uuid.uuid4(),
                     provider=spec["provider"],
@@ -90,6 +95,7 @@ def seed_model_registry(database_url: str = None) -> dict:
                     rpm=spec.get("rpm"),
                     rpd=spec.get("rpd"),
                     source="builtin",
+                    extra=extra,
                 ))
                 seeded += 1
             else:
@@ -97,6 +103,10 @@ def seed_model_registry(database_url: str = None) -> dict:
                 existing.capabilities = spec.get("capabilities", existing.capabilities)
                 existing.rpm = spec.get("rpm", existing.rpm)
                 existing.rpd = spec.get("rpd", existing.rpd)
+                if spec.get("warn_on_charge_risk"):
+                    extra = dict(existing.extra or {})
+                    extra["warn_on_charge_risk"] = True
+                    existing.extra = extra
                 updated += 1
         session.commit()
 

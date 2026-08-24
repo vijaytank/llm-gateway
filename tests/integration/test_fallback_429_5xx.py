@@ -40,12 +40,24 @@ def test_primary_429_falls_back_to_secondary():
 
 
 def test_two_failures_fall_back_to_last_resort():
+    """Primary 429 + secondary 503 → last resort must serve.
+
+    Review follow-up: a previous test's failures put deployments into
+    LiteLLM's short internal cooldown, so retry until a deployment is
+    available rather than assuming the very first call succeeds.
+    """
     mock_set_status(PRIMARY, 429)
     mock_set_status(SECONDARY, 503)
     try:
-        status, body = gateway_chat()
-        assert status == 200, body
-        assert mock_request_count(LAST) > 0, "last resort never tried"
+        def _last_resort_served():
+            status, body = gateway_chat()
+            if status == 200 and mock_request_count(LAST) > 0:
+                return status, body
+            return None
+
+        status, body = wait_until(_last_resort_served, timeout=45,
+                                  interval=3.0,
+                                  desc="fallback to last resort")
     finally:
         mock_set_status(PRIMARY, None)
         mock_set_status(SECONDARY, None)
@@ -86,9 +98,19 @@ def test_failure_events_logged_to_postgres():
 
 
 def test_recovery_after_upstream_heals():
-    """After the mock heals, requests succeed again without restarts."""
+    """After the mock heals, requests succeed again without restarts.
+
+    Note (review follow-up): LiteLLM puts deployments that returned 5xx into
+    a short internal cooldown (~5s). The heal assertion therefore retries
+    until the cooldown expires rather than assuming immediate recovery.
+    """
     mock_set_status(PRIMARY, 503)
     gateway_chat(timeout=90)
     mock_set_status(PRIMARY, None)
-    status, body = gateway_chat()
-    assert status == 200, body
+
+    def _healed():
+        status, body = gateway_chat()
+        return status == 200 and (status, body)
+
+    status, body = wait_until(_healed, timeout=30, interval=3.0,
+                              desc="recovery after upstream heals")

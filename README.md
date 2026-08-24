@@ -1,17 +1,20 @@
-"""
-README for LLM Gateway
+# LLM Gateway — Unified Free-First Routing
 
 Unified Free-First LLM Gateway — implemented from the final reviewed master plan
-(llm-gateway-final-plan.md, all 14 issues resolved).
+(`llm-gateway-final-plan.md`, all 14 issues resolved).
 
-Phase 0 Status: COMPLETE — Schema, migrations, and infrastructure established
-Phase 1 Status: COMPLETE — Core Gateway (static routing, cloud free only)
-Phase 2 Status: COMPLETE — Routing Brain (stream reader, scorer, circuit breaker, health scheduler)
-Phase 3 Status: COMPLETE — Local Models & Offline Detection (Ollama/vLLM discovery, connectivity monitor)
-Phase 4 Status: COMPLETE — Setup Wizard, Web UI (port 4002), Multi-mode Deployment (core/full profiles)
-"""
+**Status:** Phases 0–5 COMPLETE. Post-completion architecture review
+(`docs/architecture-review.md`) remediated 2025-08-25 — see CHANGELOG.md.
 
-# LLM Gateway — Unified Free-First Routing
+| Phase | Scope | Status |
+|---|---|---|
+| 0 | Schema, migrations, infrastructure | ✅ |
+| 1 | Core gateway (static routing, cloud free) | ✅ |
+| 2 | Routing brain (stream reader, scorer, circuit breaker) | ✅ |
+| 3 | Local models & offline detection | ✅ |
+| 4 | Setup wizard, web UI, multi-mode deployment | ✅ |
+| 5 | Hardening & observability (throttles, provider circuits, /metrics) | ✅ |
+| Review remediation | Security/routing/reliability fixes per docs/architecture-review.md | ✅ |
 
 ## Overview
 

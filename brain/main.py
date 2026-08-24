@@ -57,9 +57,35 @@ async def amain() -> None:
     from brain.health_scheduler import HealthScheduler
     from brain.connectivity_monitor import ConnectivityMonitor
 
+    # Real provider probe targets (review F-H2): base URLs come from env —
+    # same variables gateway/main.py uses for startup probes. Providers with
+    # no configured URL are skipped by the scheduler, never faked healthy.
+    provider_configs = {}
+    for name, url_env in (
+        ("nvidia", "NVIDIA_BASE_URL"),
+        ("groq", "GROQ_BASE_URL"),
+        ("cerebras", "CEREBRAS_BASE_URL"),
+        ("openrouter", "OPENROUTER_BASE_URL"),
+    ):
+        url = os.environ.get(url_env, "")
+        if url:
+            provider_configs[name] = {"base_url": url}
+    # Local endpoints are probe targets too, but NEVER count toward offline
+    # detection — they ARE the offline fallback (review F-L10 keeps the cloud
+    # list separate from the local pool).
+    for name, url_env in (("ollama", "OLLAMA_BASE_URL"), ("vllm", "VLLM_BASE_URL")):
+        url = os.environ.get(url_env, "")
+        if url:
+            provider_configs[name] = {"base_url": url}
+
     reader = StreamReader(redis_client=client)
-    scheduler = HealthScheduler(redis_client=client)
-    monitor = ConnectivityMonitor(redis_client=client)
+    scheduler = HealthScheduler(redis_client=client, provider_configs=provider_configs)
+    # Cloud-only list for offline accounting — local endpoints are probe
+    # targets above but NEVER offline indicators (review F-L10).
+    monitor = ConnectivityMonitor(
+        redis_client=client,
+        cloud_providers=[n for n in provider_configs if n not in ("ollama", "vllm")] or None,
+    )
     agg_scheduler = start_aggregator_scheduler()
 
     # Phase 5: Prometheus metrics exporter on its own port.

@@ -60,9 +60,13 @@ class HealthScheduler(HealthProbeResult):
     5. Support per-provider timeout configuration
     """
     
-    def __init__(self, redis_client=None, provider_configs: Optional[Dict[str, Any]] = None):
+    def __init__(self, redis_client=None, provider_configs: Optional[Dict[str, Any]] = None,
+                 probe_endpoints: Optional[Dict[str, str]] = None):
         self.redis = redis_client
         self.provider_configs = provider_configs or {}
+        # model_name -> full probe endpoint URL. Without an entry the model is
+        # SKIPPED (never fabricated healthy) — review F-H2.
+        self.probe_endpoints = probe_endpoints or {}
         self.running = False
         
         # Track last probe time per model
@@ -224,7 +228,17 @@ class HealthScheduler(HealthProbeResult):
             provider_config = self.provider_configs.get(provider, {})
             timeout = provider_config.get("probe_timeout_seconds", PROBE_TIMEOUT_SECONDS)
             
-            # Run the structured health probe
+            # Resolve the probe endpoint from the injected map (populated from
+            # GatewayConfig / registry at brain startup). Review F-H2: with no
+            # known endpoint we SKIP and leave existing status untouched — we
+            # never fabricate "healthy" for a model we could not probe.
+            endpoint = self._get_probe_endpoint(model_name, provider)
+            
+            if not endpoint:
+                print(f"[health_scheduler] no probe endpoint for {model_name} — skipping")
+                return
+            
+            # Run the probe with timeout
             try:
                 # Import here to avoid circular imports
                 from httpx import AsyncClient
@@ -235,24 +249,14 @@ class HealthScheduler(HealthProbeResult):
                         {"role": "user", "content": "Reply with the single word OK."}
                     ],
                     "max_tokens": 3,
+                    "model": model_name,
                 }
                 
-                # Determine the probe endpoint for this provider/model
-                # In a full implementation, this would use the provider's base URL
-                # and model-specific endpoint
-                endpoint = self._get_probe_endpoint(model_name, provider)
-                
-                if not endpoint:
-                    # Skip probing if no endpoint determined
-                    self._on_probe_result(model_name, self.HEALTHY, healthy=True)
-                    return
-                
-                # Run the probe with timeout
                 async with AsyncClient() as client:
                     response = await client.post(
                         endpoint,
                         json=probe_payload,
-                        timeout=timeout / 1000.0,
+                        timeout=max(timeout, 1),
                     )
                 
                 # Classify the response per Issue 5
@@ -262,18 +266,7 @@ class HealthScheduler(HealthProbeResult):
                     provider
                 )
                 
-                # Update scheduler state
-                self._last_probe[model_name] = current_time
-                
-                if classification == self.HEALTHY:
-                    self._consecutive_errors[model_name] = 0
-                    self._last_success[model_name] = current_time
-                    self._on_probe_result(model_name, self.HEALTHY, healthy=True)
-                else:
-                    self._consecutive_errors[model_name] = (
-                        self._consecutive_errors.get(model_name, 0) + 1
-                    )
-                    self._on_probe_result(model_name, classification, healthy=healthy)
+                self._on_probe_result(model_name, classification, healthy)
                     
             except Exception as e:
                 # Probe failed (timeout, connection error, etc.)
@@ -285,15 +278,19 @@ class HealthScheduler(HealthProbeResult):
     
     def _get_probe_endpoint(self, model_name: str, provider: Optional[str]) -> Optional[str]:
         """Get the health probe endpoint for a model/provider.
-        
-        In a full implementation, this would look up the appropriate endpoint
-        from the model registry or provider configuration.
+
+        Resolution order:
+        1. Explicit per-model map injected at construction (from config/registry).
+        2. Provider base URL from provider_configs → OpenAI-compatible
+           chat-completions path (works for NIM/Groq/Cerebras/custom providers).
+        Returns None when unknown — callers must SKIP, not fake health.
         """
-        # Placeholder: return None to skip probing
-        # Full implementation would construct URL like:
-        # - NVIDIA NIM: {base_url}/v1/models/{model}/health
-        # - Groq: {base_url}/health
-        # - Cerebras: {base_url}/v1/models/{model}:health
+        if model_name in self.probe_endpoints:
+            return self.probe_endpoints[model_name]
+        pc = self.provider_configs.get(provider) or {}
+        base_url = pc.get("base_url") or ""
+        if base_url:
+            return f"{str(base_url).rstrip('/')}/chat/completions"
         return None
     
     def _classify_probe_response(

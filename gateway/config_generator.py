@@ -304,6 +304,9 @@ def generate_litellm_config(config: GatewayConfig) -> dict[str, Any]:
     # Custom logger callbacks (request_logs + Redis stream for the brain).
     # LiteLLM loads these from litellm_settings.callbacks (dotted import
     # paths) — the CUSTOM_CALLBACKS env var is not a LiteLLM feature.
+    # The same callback class implements async_pre_call_hook (review F-H1),
+    # which consults brain-maintained Redis state before each routing
+    # decision — this registration is what wires RouterHook into the path.
     callbacks_env = os.environ.get("GATEWAY_CALLBACKS", "gateway.callbacks.custom_logger")
     callbacks_list = [c.strip() for c in callbacks_env.split(",") if c.strip()]
     if callbacks_list:
@@ -320,7 +323,15 @@ def generate_litellm_config(config: GatewayConfig) -> dict[str, Any]:
     
     # Add router settings from routing defaults
     defaults = config.routing_defaults
-    router_settings = {}
+    router_settings = {
+        # Score-aware deployment selection; the pre-call hook annotates each
+        # request with gateway_influence / exclusion flags from Redis state.
+        # NOTE: must be "latency-based-routing" (v1) — in litellm 1.70 the v2
+        # variant filters deployments against model_info fields and rejects
+        # every deployment that carries custom keys (verified live, review
+        # follow-up).
+        "routing_strategy": "latency-based-routing",
+    }
     
     # Set score weights if present
     if hasattr(defaults, 'score_weight_success_rate'):

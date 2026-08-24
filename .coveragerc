@@ -1,0 +1,3 @@
+# Coverage gate (review F-M15 decision): 70% enforced floor for unit tests.
+[coverage:report]
+fail_under = 70

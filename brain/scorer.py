@@ -65,8 +65,10 @@ def get_redis():
         return None
 
 
-_MODEL_WINDOW_KEY = "gateway:model:{model}:window"
-_MODEL_STATS_KEY = "gateway:model:{model}:stats"
+_MODEL_WINDOW_KEY = "gateway:model:{model}:latency_window"
+_MODEL_OUTCOME_KEY = "gateway:model:{model}:outcome_window"
+_MODEL_QUOTA_RPM_KEY = "gateway:model:{model}:quota:rpm"
+_MODEL_QUOTA_RPD_KEY = "gateway:model:{model}:quota:rpd"
 
 
 def compute_score(
@@ -105,20 +107,17 @@ def compute_score(
         return 0.0  # Last resort within tier
     
     # Retrieve rolling window data from Redis
-    window_key = _MODEL_WINDOW_KEY.format(model=model_name)
-    stats_key = _MODEL_STATS_KEY.format(model=model_name)
-    
     # Get success rate from the rolling window
-    success_rate = _get_success_rate(redis_client=get_redis(), model_key=stats_key, window_size=window_size)
+    success_rate = _get_success_rate(redis_client=get_redis(), model_name=model_name, window_size=window_size)
     
-    # Get normalized latency from the rolling window
+    # Get normalized latency from the rolling latency window
     normalized_latency = _get_normalized_latency(
-        redis_client=get_redis(), model_key=window_key, latency_ms=latency_ms,
+        redis_client=get_redis(), model_name=model_name, latency_ms=latency_ms,
         critical_threshold=LATENCY_CRITICAL_THRESHOLD_MS
     )
     
-    # Get quota headroom from model stats
-    quota_headroom = _get_quota_headroom(redis_client=get_redis(), model_key=stats_key)
+    # Get quota headroom from the live RPM/RPD counters
+    quota_headroom = _get_quota_headroom(redis_client=get_redis(), model_name=model_name)
     
     # Compute the weighted score
     score = (
@@ -131,39 +130,28 @@ def compute_score(
     return max(-1.0, min(1.0, score))
 
 
-def _get_success_rate(redis_client, model_key: str, window_size: int) -> float:
-    """Get the success rate from the rolling window."""
-    # In a full implementation, this would read from Redis
-    # For now, return a default based on the window
-    # The window stores [success_count, failure_count, total_count]
-    # We read the total count and success count
-    
-    # Placeholder: read from Redis hash
-    # hgetall would return: {"successes": N, "failures": M, "total": N+M}
-    # For Phase 2 prototype, use a simple computation
-    
-    # Read current stats from the key
+def _get_success_rate(redis_client, model_name: str, window_size: int) -> float:
+    """Success rate over the ROLLING last-N outcome window.
+
+    The stream reader maintains gateway:model:{m}:outcome_window — a capped
+    list of "1" (success) / "0" (failure) entries. This replaces the old
+    unbounded cumulative hash so fresh failures are not masked by history.
+    """
     try:
-        # Decode bytes to string if needed
-        raw = redis_client.hgetall(model_key) if redis_client else {}
-        if isinstance(raw, bytes):
-            raw = {k.decode('utf-8'): v.decode('utf-8') for k, v in raw.items()}
-        
-        successes = int(raw.get(b"successes", raw.get("successes", 0)))
-        failures = int(raw.get(b"failures", raw.get("failures", 0)))
-        total = successes + failures
-        
-        if total == 0:
+        if redis_client is None:
+            return 0.5
+        raw = redis_client.lrange(_MODEL_OUTCOME_KEY.format(model=model_name),
+                                  -window_size, -1)
+        outcomes = [1 if str(v).strip() == "1" else 0 for v in raw]
+        if not outcomes:
             return 0.5  # Default: neutral score when no data
-        
-        return successes / total
-        
+        return sum(outcomes) / len(outcomes)
     except Exception:
         return 0.5  # Default neutral score on error
 
 
 def _get_normalized_latency(
-    redis_client, model_key: str, latency_ms: Optional[int],
+    redis_client, model_name: str, latency_ms: Optional[int],
     critical_threshold: int = LATENCY_CRITICAL_THRESHOLD_MS
 ) -> float:
     """Get the normalized latency from the rolling window.
@@ -177,7 +165,8 @@ def _get_normalized_latency(
         samples: list[float] = []
         if redis_client is not None:
             try:
-                raw = redis_client.lrange("gateway:model:" + model_key.split(":")[2] + ":latency_window", -MOVING_AVG_WINDOW, -1)
+                raw = redis_client.lrange(_MODEL_WINDOW_KEY.format(model=model_name),
+                                          -MOVING_AVG_WINDOW, -1)
                 samples = [float(v) for v in raw if str(v).replace(".", "", 1).isdigit()]
             except Exception:
                 samples = []
@@ -199,24 +188,36 @@ def _get_normalized_latency(
         return 0.5  # Default neutral on error
 
 
-def _get_quota_headroom(redis_client, model_key: str) -> float:
-    """Get the quota headroom (1 - used/limit) from the model stats."""
+# Conservative default limits when the registry carries no quota data for a
+# model (mirrors seed_model_registry.py values).
+_DEFAULT_RPM_LIMIT = 10
+
+
+def _get_quota_headroom(redis_client, model_name: str) -> float:
+    """Quota headroom (1 - used/limit) from the live sliding-window counters.
+
+    Reads the RPM counter (60s TTL, maintained by the stream reader) against
+    the model registry's rpm limit stored in the stats hash; falls back to
+    full headroom when no data exists.
+    """
     try:
-        # Read the quota state from Redis hash
-        # Expected fields: {"used": N, "limit": M, "rpm": P, "tpm": T, "rpd": D, "tpd": F}
-        raw = redis_client.hgetall(model_key) if redis_client else {}
-        if isinstance(raw, bytes):
-            raw = {k.decode('utf-8'): v.decode('utf-8') for k, v in raw.items()}
-        
-        used = int(raw.get(b"used", raw.get("used", 0)))
-        limit = int(raw.get(b"limit", raw.get("limit", 1)))  # Avoid div by 0
-        
+        if redis_client is None:
+            return 1.0
+
+        used_rpm = int(redis_client.get(_MODEL_QUOTA_RPM_KEY.format(model=model_name)) or 0)
+
+        # Limit lookup: seeded per-model stats hash (written at config-gen /
+        # seed time); fall back to a conservative default.
+        raw_limit = redis_client.hget(
+            f"gateway:model:{model_name}:limits", "rpm")
+        limit = int(raw_limit) if raw_limit else _DEFAULT_RPM_LIMIT
+
         if limit <= 0:
             return 1.0  # No quota constraint = full headroom
-        
-        headroom = 1.0 - (used / limit)
+
+        headroom = 1.0 - (used_rpm / limit)
         # Clamp to [0, 1]
         return max(0.0, min(1.0, headroom))
-        
+
     except Exception:
         return 1.0  # Default full headroom on error

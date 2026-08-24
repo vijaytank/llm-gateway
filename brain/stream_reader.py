@@ -89,6 +89,7 @@ class StreamReader:
         score_ttl_seconds: int = 300,  # 5-minute TTL for scores
         window_size: int = 50,  # Rolling window for scoring
         connection_error_window_seconds: int = 120,  # offline detection window
+        claim_idle_ms: int = 60_000,  # XAUTOCLAIM idle threshold
     ):
         self.redis = redis_client
         from brain.scorer import set_redis_client
@@ -99,8 +100,14 @@ class StreamReader:
         self.consumer_name = consumer_name
         self.score_ttl = score_ttl_seconds
         self.window_size = window_size
+        self.claim_idle_ms = claim_idle_ms
         self.running = False
         self.message_counter = 0
+        # One shared circuit-breaker manager: used by event handling AND the
+        # metrics gauge (previously the gauge read a never-set attribute and
+        # always reported "closed").
+        from brain.circuit_breaker import CircuitBreakerManager
+        self.cb_manager = CircuitBreakerManager(redis_client)
         # Connectivity error accounting (Phase 3): every failure event that
         # classifies as a connection failure is recorded here so the
         # connectivity monitor's provider-failure count updates automatically.
@@ -115,6 +122,15 @@ class StreamReader:
         
         # Ensure consumer group exists
         self._ensure_consumer_group()
+        
+        # Recover pending messages from a previous crashed consumer before
+        # entering the main loop (plan Phase 2 AC: XAUTOCLAIM handles unacked
+        # messages after a brain crash). Claim anything idle past the
+        # threshold and process it like a fresh message.
+        try:
+            self._reclaim_pending()
+        except Exception as e:
+            print(f"[stream_reader] pending reclaim skipped: {e}")
         
         print(f"StreamReader started: consumer={self.consumer_name}, "
               f"stream={self.stream_name}, group={self.consumer_group}")
@@ -140,6 +156,40 @@ class StreamReader:
             else:
                 raise
     
+    def _reclaim_pending(self, batch: int = 50) -> int:
+        """XAUTOCLAIM messages stuck pending (crashed consumer), then process them.
+
+        Returns the number of reclaimed-and-processed messages.
+        """
+        cursor = "0-0"
+        claimed_total = 0
+        while True:
+            result = self.redis.xautoclaim(
+                self.stream_name,
+                self.consumer_group,
+                self.consumer_name,
+                min_idle_time=self.claim_idle_ms,
+                start_id=cursor,
+                count=batch,
+            )
+            # redis-py returns (next_cursor, messages[, deleted_ids]) — older
+            # versions return just the pair; handle both shapes.
+            next_cursor = result[0]
+            messages = result[1] if len(result) > 1 else []
+            for entry in messages:
+                message_id, message_data = entry[0], entry[1]
+                try:
+                    self._process_message(message_id, message_data)
+                    claimed_total += 1
+                except Exception as e:
+                    print(f"Error processing reclaimed message {message_id}: {e}")
+            if next_cursor == "0-0" or not messages:
+                break
+            cursor = next_cursor
+        if claimed_total:
+            print(f"[stream_reader] reclaimed {claimed_total} pending message(s)")
+        return claimed_total
+    
     def _read_loop(self) -> None:
         """Main read loop: XREADGROUP with BLOCK, process events, ACK."""
         print("Entering stream read loop...")
@@ -147,7 +197,6 @@ class StreamReader:
         while self.running:
             try:
                 # XREADGROUP with BLOCK 5000ms (5s timeout)
-                # Block until new message arrives or timeout
                 results = self.redis.xreadgroup(
                     self.consumer_group,
                     self.consumer_name,
@@ -165,7 +214,7 @@ class StreamReader:
                             self._process_message(message_id, message_data)
                         except Exception as e:
                             print(f"Error processing message {message_id}: {e}")
-                            # Don't ACK — message will be re-read next cycle
+                            # Not ACKed — stays pending; XAUTOCLAIM reclaims it later
                         
             except Exception as e:
                 if self.running:
@@ -173,15 +222,20 @@ class StreamReader:
                 time.sleep(1)  # Brief pause before retry
     
     def _process_message(self, message_id: str, message_data: Dict[str, Any]) -> None:
-        """Process a single stream message: parse, score, circuit breaker."""
+        """Process a single stream message: parse, score, circuit breaker, then ACK.
+
+        ACK comes LAST (process-then-ack): a crash mid-processing leaves the
+        message pending instead of silently lost (plan: exactly-once intent).
+        """
         try:
-            # Acknowledge the message immediately so it's not re-read
-            self.redis.xack(self.stream_name, self.consumer_group, message_id)
-            
-            # Parse the event data
+            # Parse the event data FIRST
             event = self._parse_event(message_data)
+            
             if event is None:
-                print(f"Failed to parse message {message_id}")
+                # Poison message: can never parse. Acknowledge so it doesn't
+                # block the pending list forever, but log loudly.
+                print(f"Failed to parse message {message_id} — acknowledging poison message")
+                self.redis.xack(self.stream_name, self.consumer_group, message_id)
                 return
             
             # Dispatch to score updater
@@ -194,17 +248,16 @@ class StreamReader:
             metrics = getattr(self, "metrics", None)
             if metrics is not None:
                 try:
+                    model_for_metrics = event.actual_model or event.virtual_model
                     metrics.observe_request(
-                        model=event.actual_model or event.virtual_model,
+                        model=model_for_metrics,
                         provider=event.provider or "unknown",
                         status=event.status,
                         latency_ms=event.latency_ms,
                     )
                     metrics.set_circuit_state(
-                        event.actual_model or event.virtual_model,
-                        self.cb_manager.get_state(
-                            event.actual_model or event.virtual_model)
-                        if hasattr(self, "cb_manager") else "closed",
+                        model_for_metrics,
+                        self.cb_manager.get_state(model_for_metrics),
                     )
                 except Exception as me:
                     print(f"[metrics] update failed: {me}")
@@ -218,11 +271,13 @@ class StreamReader:
             self.message_counter += 1
             if self.message_counter % 100 == 0:
                 print(f"Processed {self.message_counter} events...")
+            
+            # ACK only AFTER successful processing.
+            self.redis.xack(self.stream_name, self.consumer_group, message_id)
                 
         except Exception as e:
             print(f"Failed to process message {message_id}: {e}")
-            # Don't ACK — message will be re-read next cycle
-            raise
+            # No ACK — message stays pending; XAUTOCLAIM will retry it later.
     
     def _parse_event(self, message_data: Dict[str, Any]) -> Optional[RequestEvent]:
         """Parse raw Redis message data into RequestEvent."""
@@ -250,15 +305,43 @@ class StreamReader:
             return None
     
     def _update_score(self, event: RequestEvent) -> None:
-        """Update model score using the scoring formula."""
+        """Update model score using the scoring formula.
+
+        Maintains three Redis structures per model:
+        - outcome_window: rolling last-N list of 1/0 outcomes (success rate
+          over the moving window per plan Issue 5 — replaces the old unbounded
+          cumulative successes/failures hash)
+        - score: computed score with TTL (router sort key)
+        - latency_window + quota counters (rpm/rpd sliding windows)
+        """
         try:
             # Determine which model to score (actual_model takes priority, fallback to virtual)
             model_name = event.actual_model or event.virtual_model
             if not model_name:
                 return
             
+            # Record the outcome in the ROLLING window first so the scorer's
+            # success-rate term reflects the last N requests, not all history.
+            outcome_key = f"gateway:model:{model_name}:outcome_window"
+            pipe = self.redis.pipeline()
+            pipe.rpush(outcome_key, "1" if event.status == "success" else "0")
+            pipe.ltrim(outcome_key, -self.window_size, -1)
+            pipe.expire(outcome_key, self.score_ttl * 6)
+
+            # Quota counters (sliding windows): RPM counter with a 60s TTL and
+            # an RPD zset trimmed to the current UTC day. These feed the
+            # quota_headroom term of compute_score (previously constant 1.0).
+            now = time.time()
+            rpm_key = f"gateway:model:{model_name}:quota:rpm"
+            rpd_key = f"gateway:model:{model_name}:quota:rpd"
+            pipe.incr(rpm_key)
+            pipe.expire(rpm_key, 60)
+            pipe.zadd(rpd_key, {f"{now}": now})
+            pipe.zremrangebyscore(rpd_key, "-inf", now - 86400)
+            pipe.expire(rpd_key, 86400)
+            pipe.execute()
+            
             # Compute new score using the formula from Issue 5
-            # compute_score handles the rolling window internally
             new_score = compute_score(
                 model_name=model_name,
                 provider=event.provider or "unknown",
@@ -270,14 +353,6 @@ class StreamReader:
             )
             
             # Write score to Redis with TTL
-            # Record the outcome in the rolling stats hash (feeds success_rate)
-            stats_key = f"gateway:model:{model_name}:stats"
-            if event.status == "success":
-                self.redis.hincrby(stats_key, "successes", 1)
-            else:
-                self.redis.hincrby(stats_key, "failures", 1)
-            self.redis.expire(stats_key, self.score_ttl * 6)
-
             score_key = f"gateway:model:{model_name}:score"
             self.redis.setex(
                 score_key,
@@ -288,7 +363,6 @@ class StreamReader:
             # Maintain a rolling latency window in Redis (list capped at window_size)
             latency_key = f"gateway:model:{model_name}:latency_window"
             pipe = self.redis.pipeline()
-            pipe.delete(latency_key + ":tmp")  # no-op keepalive
             pipe.rpush(latency_key, event.latency_ms or 0)
             pipe.ltrim(latency_key, -self.window_size, -1)
             pipe.expire(latency_key, self.score_ttl * 2)

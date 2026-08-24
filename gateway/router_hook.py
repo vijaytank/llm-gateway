@@ -197,12 +197,6 @@ class RouterHook:
             # (never excluded) but ranked below healthy providers' models.
             if redis_score >= 0.8:
                 base = int(redis_score * 10)
-            elif redis_score >= 0.6:
-                base = int(redis_score * 10)
-            elif redis_score >= 0.4:
-                base = int(redis_score * 10)
-            elif redis_score >= 0.2:
-                base = int(redis_score * 10)
             elif redis_score >= 0:
                 base = int(redis_score * 10)
             else:
@@ -293,15 +287,12 @@ class RouterHook:
             if influence >= 6:  # Score >= 0.6
                 # High priority — move to front (but after already-placed high-scorers)
                 scored_chain.insert(0, model)
-            elif influence >= 3:  # Score >= 0.3
-                # Middle priority
+            elif influence >= 0:
+                # Middle or low priority — appended in order
                 scored_chain.append(model)
-            elif influence >= 0:  # Score >= 0 but low
-                # Low priority — after high and middle
-                scored_chain.append(model)
-            else:  # -1 — excluded
-                # Excluded models go to the very end
-                scored_chain.append(model)
+            else:  # -1 — excluded: dropped entirely (review F-M14; previously
+                # appended to the end, keeping them routable)
+                continue
         
         # Remove duplicates while preserving order
         seen = set()
@@ -311,10 +302,9 @@ class RouterHook:
                 seen.add(model)
                 unique_chain.append(model)
         
-        # Ensure all models from original chain are present
-        for model in fallback_chain:
-            if model not in seen:
-                unique_chain.append(model)
+        # NOTE (review F-M14): models dropped as excluded (-1 influence) stay
+        # dropped — the old "ensure all present" backfill re-added them,
+        # silently defeating exclusion.
 
         # Offline mode: stable-sort so local models lead and cloud models sink
         # (stable sort preserves score-based order within each group).

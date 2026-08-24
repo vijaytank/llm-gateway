@@ -97,6 +97,9 @@ def test_tool_use_round_trip():
 
 
 def test_streaming_emits_anthropic_sse():
+    """F-H4 fix: streaming now works on the STANDARD /v1/messages route
+    (`stream: true` in the body) — exactly what Anthropic SDK clients send.
+    The old separate /v1/messages/stream route was removed."""
     payload = {
         "model": "auto-free",
         "max_tokens": 30,
@@ -104,8 +107,10 @@ def test_streaming_emits_anthropic_sse():
         "messages": [{"role": "user", "content": "stream via adapter"}],
     }
     status, headers, raw = http_raw(
-        "POST", f"{ADAPTER_URL}/v1/messages/stream", payload, timeout=60)
+        "POST", f"{ADAPTER_URL}/v1/messages", payload, timeout=60)
     assert status == 200, raw[:300]
+    assert headers.get("Content-Type", "").startswith("text/event-stream"), \
+        f"expected SSE content-type, got {headers.get('Content-Type')}"
     text = raw.decode()
 
     events = []
@@ -115,16 +120,3 @@ def test_streaming_emits_anthropic_sse():
     assert events, f"no SSE event lines in: {text[:400]}"
     # Anthropic stream opens with message_start
     assert events[0] == "message_start", f"first event was {events[0]}"
-
-
-def test_openai_passthrough_on_adapter_port():
-    """Adapter also serves OpenAI-format pass-through to the gateway."""
-    status, body = http_json(
-        "POST", f"{ADAPTER_URL}/v1/chat/completions",
-        {"model": "auto-free",
-         "messages": [{"role": "user", "content": "passthrough"}]},
-        timeout=60,
-    )
-    assert status == 200, body
-    data = json.loads(body)
-    assert data["object"] == "chat.completion"

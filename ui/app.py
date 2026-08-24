@@ -322,6 +322,16 @@ async def providers_add(
 ):
     """Add a custom provider. The provider is probed live before saving;
     a failed probe returns an error and nothing is persisted."""
+    # Probe FIRST (review F-M7): construct the CustomProviderConfig only once
+    # real model names exist — placeholder models can no longer be constructed.
+    discovery = list_models(base_url=base_url.strip(), auth_type="bearer",
+                            api_key_env=api_key_env.strip(), timeout=12.0)
+    if not discovery.ok or not discovery.models:
+        return providers_add_error(
+            f"Model discovery failed ({discovery.error}); add the provider "
+            "with a reachable /v1/models endpoint."
+        )
+
     try:
         cp = CustomProviderConfig(
             name=name.strip().lower(),
@@ -329,24 +339,10 @@ async def providers_add(
             api_key_env=api_key_env.strip(),
             tier=tier,
             capabilities=[c.strip() for c in capabilities.split(",") if c.strip()],
-            models=["__probe__"],  # placeholder to pass validation pre-discovery
+            models=discovery.models,
         )
     except Exception as e:
         return providers_add_error(f"Invalid provider: {e}")
-
-    # Probe: discover via /v1/models, then verify chat completion works
-    discovery = list_models(base_url=cp.base_url, auth_type=cp.auth_type,
-                            api_key_env=cp.api_key_env,
-                            timeout=float(cp.probe_timeout_seconds))
-    if discovery.ok and discovery.models:
-        cp.models = discovery.models
-    elif discovery.ok and discover_models:
-        return providers_add_error("Model discovery returned an empty list; add models manually.")
-    elif discovery.ok:
-        cp.models = ["__unverified__"]
-    else:
-        # /models endpoint missing — try a chat probe against any user-specified model
-        return providers_add_error(f"Provider probe failed: {discovery.error}")
 
     chat_probe = probe_provider(
         base_url=cp.base_url, model=cp.models[0], auth_type=cp.auth_type,

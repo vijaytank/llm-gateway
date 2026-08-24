@@ -24,15 +24,21 @@ def _score(model):
 
 
 def test_successful_traffic_writes_scores():
-    """Real successful requests → brain computes and stores a score in Redis."""
-    for _ in range(3):
-        assert gateway_chat()[0] == 200
+    """Real successful requests → brain computes and stores a score in Redis.
 
-    def _scored():
-        return _score("alpha-primary") is not None
-    wait_until(_scored, timeout=60, interval=1.0, desc="score key for alpha-primary")
+    Review follow-up: LiteLLM's ~5s internal cooldowns (from earlier tests'
+    injected failures) can park all deployments briefly, so keep firing until
+    the brain records a score instead of assuming three calls suffice.
+    """
+    import time as _time
+
+    deadline = _time.time() + 90
+    while _time.time() < deadline and _score("alpha-primary") is None:
+        gateway_chat()  # tolerate non-200s during cooldown windows
+        _time.sleep(1.0)
 
     s = _score("alpha-primary")
+    assert s is not None, "brain never wrote a score for alpha-primary"
     assert 0.0 <= s <= 1.0, f"score out of range: {s}"
 
 
