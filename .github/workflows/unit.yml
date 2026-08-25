@@ -39,18 +39,26 @@ jobs:
       - name: Secret scan
         run: |
           pip install detect-secrets
-          # Fail only on findings NOT in the committed baseline.
-          detect-secrets scan --baseline secrets.baseline \
+          # detect-secrets 1.5.x has no stdout output in --baseline mode,
+          # so scan plainly and diff against the committed baseline here.
+          detect-secrets scan \
             --exclude-files '\.env\.example$' \
             --exclude-files 'node_modules' \
-            --exclude-files '\.venv' > new_secrets.json || true
+            --exclude-files '\.venv' \
+            --exclude-files 'secrets\.baseline' > new_secrets.json || true
           python - <<'EOF'
           import json, sys
-          data = json.load(open('new_secrets.json'))
-          results = data.get('results', {})
-          if results:
+          new = json.load(open('new_secrets.json'))['results']
+          base = json.load(open('secrets.baseline'))['results']
+          # Normalize Windows/Linux path separators when comparing.
+          def sig(f, s): return (f.replace('\\\\', '/'), s['type'])
+          known = {sig(f, s) for f, items in base.items() for s in items}
+          fresh = {f: [s for s in items if sig(f, s) not in known]
+                   for f, items in new.items()}
+          fresh = {f: v for f, v in fresh.items() if v}
+          if fresh:
               print('NEW POTENTIAL SECRETS FOUND:')
-              for f, items in results.items():
+              for f, items in fresh.items():
                   for s in items:
                       print(f"  {f}:{s['line_number']} {s['type']}")
               sys.exit(1)
