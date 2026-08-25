@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-This audit reviews **9 external repositories** cloned into `E:/Projects/llm-router/external-repos` against the requirements in:
+This audit reviews **9 external repositories** from public upstream repositories against the requirements in:
 - `llm-gateway-final-plan.md` (core architecture, 14 issues + fixes)
 - `llm-gateway-dev-plan-v2.md` (dev environment, expanded repo audit, release plan)
 

@@ -2,8 +2,8 @@
 
 > **Document type:** File-by-file code review against `llm-gateway-final-plan.md`
 > **Review date:** 2025-08-25 (session date: Tuesday, Aug 25)
-> **Project root:** `E:\Projects\llm-router\llm-gateway`
-> **Design reference:** `E:\Projects\llm-router\llm-gateway-final-plan.md` (977 lines, 14 issues + fixes, Phases 0–5)
+> **Project root:** repository root
+> **Design reference:** master plan document (14 issues + fixes, Phases 0–5)
 > **Reviewer scope:** All production modules (`gateway/`, `brain/`, `adapter/`, `ui/`, `wizard/`, `schemas/`, `scripts/`, `alembic/`, `docker/`, UI templates), all 30 test files, compose files + overlays, both audit docs, runbook — **every file in the repo was read; nothing sampled.**
 >
 > **Intentional exclusions (per project decision, NOT flagged as gaps):**

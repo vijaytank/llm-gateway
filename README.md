@@ -1,7 +1,14 @@
 # LLM Gateway — Unified Free-First Routing
 
-Unified Free-First LLM Gateway — implemented from the final reviewed master plan
-(`llm-gateway-final-plan.md`, all 14 issues resolved).
+[![Unit tests](https://github.com/vijaytank/llm-gateway/actions/workflows/unit.yml/badge.svg?branch=develop)](https://github.com/vijaytank/llm-gateway/actions/workflows/unit.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+A self-hosted gateway that routes OpenAI-format requests across free cloud LLM
+providers (NVIDIA NIM, Groq, Cerebras, OpenRouter) plus local models
+(Ollama/vLLM) and user-defined custom providers, with static fallback chains,
+metadata logging to Postgres, live routing state in Redis, an Anthropic
+inbound adapter for Claude Code / Anthropic SDK tools, and a server-rendered
+web UI for status, stats, and provider management.
 
 **Status:** Phases 0–5 COMPLETE. Post-completion architecture review
 (`docs/architecture-review.md`) remediated 2025-08-25 — see CHANGELOG.md.
@@ -18,12 +25,10 @@ Unified Free-First LLM Gateway — implemented from the final reviewed master pl
 
 ## Overview
 
-A self-hosted gateway that routes OpenAI-format requests across free cloud LLM
-providers (NVIDIA NIM, Groq, Cerebras, OpenRouter) plus local models
-(Ollama/vLLM) and user-defined custom providers, with static fallback chains,
-metadata logging to Postgres, live routing state in Redis, an Anthropic
-inbound adapter for Claude Code / Anthropic SDK tools, and a server-rendered
-web UI for status, stats, and provider management.
+The gateway exposes an OpenAI-compatible endpoint and picks the best available
+free provider per request: a scoring brain (success rate 0.40 / latency 0.35 /
+quota headroom 0.25) ranks models in Redis, circuit breakers pull failing
+providers out of the chain, and offline detection falls back to local models.
 
 | Service | Port | Purpose |
 |---------|------|---------|
@@ -173,22 +178,23 @@ routing_defaults:
 
 ## Development
 
+Requires **Python 3.11+**. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full
+dev-environment setup and PR workflow.
+
 ```bash
 pip install -r requirements.txt
 pytest tests/unit/           # no network needed
 pytest tests/integration/    # requires docker-compose stack
-pytest tests/contract/       # SDK contract tests
 ```
 
 ## References
 
-- `llm-gateway-final-plan.md` — master plan (all 14 issues + fixes)
+- `docs/architecture-review.md` — post-completion review & remediation record
+- `docs/runbook.md` — operator procedures (add/remove provider, circuit resets)
 - `docs/repo-audit.md` — 9 external repos analyzed
 - `docs/dependency-audit.md` — pinned versions, licenses, Enterprise gate check
 
 ---
 
-**Status:** Phases 0–4 complete (142 unit tests passing; UI smoke-tested live)
-**Next:** Phase 5 — Hardening, Observability & Documentation (half-open throttle,
-provider-level circuit breaker, `/metrics`, Grafana, config export/import, runbook)
-**License:** MIT
+**Status:** v1.1.0 — Phases 0–5 complete, architecture-review remediation merged.
+**License:** MIT — see [LICENSE](LICENSE).

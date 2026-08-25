@@ -42,3 +42,15 @@ node_modules/
 
 # Docker local overrides
 docker/docker-compose.override.yml
+
+# Agent/editor local state
+.claude/settings.local.json
+
+# Local evidence/test logs (kept out of the repo)
+/docs/evidence/
+
+# CI secret-scan output
+secrets.json
+
+# Explicit: real env files (belt-and-braces next to wizard output)
+docker/.env

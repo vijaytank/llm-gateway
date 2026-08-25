@@ -2,7 +2,7 @@ name: unit
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop, Develop]
   pull_request:
 
 jobs:

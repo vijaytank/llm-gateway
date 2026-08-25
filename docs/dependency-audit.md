@@ -48,14 +48,14 @@ These repositories are **cloned locally for pattern extraction only**. They are 
 
 | Repo | Path | License | Status | Phase 1 Patterns Extracted |
 |---|---|---|---|---|
-| nvidia-free-endpoints | `E:/Projects/llm-router/nvidia-free-endpoints/` | MIT | ✅ Cloned | Model registry seeding: NIM free models, capabilities, quotas |
-| opencode-provider-nvidia-nim | `E:/Projects/llm-router/opencode-provider-nvidia-nim/` | MIT | ✅ Cloned | **Primary**: Anthropic↔OpenAI translation (tool_use, tool_result, images, streaming) — basis for adapter/translation.py |
-| freerouter | `E:/Projects/llm-router/freerouter/` | Apache-2.0 | ✅ Cloned | 14-dimension classifier concept, fallback chain config, config deep-merge pattern |
-| free-router | `E:/Projects/llm-router/free-router/` | Apache-2.0 | ✅ Cloned | Health probe verdict taxonomy (429→Overloaded, content_filter→healthy), chmod 600, 10s timeout |
-| llamux-llm-router | `E:/Projects/llm-router/llamux-llm-router/` | MIT | ✅ Cloned | CSV quota schema (rpm, tpm, rph, rpd, tpd) → model_registry columns |
-| llm-rate-limits-tracker | `E:/Projects/llm-router/llm-rate-limits-tracker/` | MIT | ✅ Cloned | Weekly rate limit data → model_registry limit defaults seeding |
-| anthropic-openai-proxy-go | `E:/Projects/llm-router/anthropic-openai-proxy-go/` | MIT | ✅ Cloned | Secondary validation for adapter translation patterns, error handling edge cases |
-| claude-adapter | `E:/Projects/llm-router/claude-adapter/` | MIT | ✅ Cloned | Setup wizard UX pattern, model tier mapping, interactive CLI flow |
+| nvidia-free-endpoints | <external repo clone> | MIT | ✅ Cloned | Model registry seeding: NIM free models, capabilities, quotas |
+| opencode-provider-nvidia-nim | <external repo clone> | MIT | ✅ Cloned | **Primary**: Anthropic↔OpenAI translation (tool_use, tool_result, images, streaming) — basis for adapter/translation.py |
+| freerouter | <external repo clone> | Apache-2.0 | ✅ Cloned | 14-dimension classifier concept, fallback chain config, config deep-merge pattern |
+| free-router | <external repo clone> | Apache-2.0 | ✅ Cloned | Health probe verdict taxonomy (429→Overloaded, content_filter→healthy), chmod 600, 10s timeout |
+| llamux-llm-router | <external repo clone> | MIT | ✅ Cloned | CSV quota schema (rpm, tpm, rph, rpd, tpd) → model_registry columns |
+| llm-rate-limits-tracker | <external repo clone> | MIT | ✅ Cloned | Weekly rate limit data → model_registry limit defaults seeding |
+| anthropic-openai-proxy-go | <external repo clone> | MIT | ✅ Cloned | Secondary validation for adapter translation patterns, error handling edge cases |
+| claude-adapter | <external repo clone> | MIT | ✅ Cloned | Setup wizard UX pattern, model tier mapping, interactive CLI flow |
 
 ---
 
