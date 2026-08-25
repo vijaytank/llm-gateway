@@ -51,7 +51,7 @@ jobs:
           new = json.load(open('new_secrets.json'))['results']
           base = json.load(open('secrets.baseline'))['results']
           # Normalize Windows/Linux path separators when comparing.
-          def sig(f, s): return (f.replace('\', '/'), s['type'])
+          def sig(f, s): return (f.replace('\\', '/'), s['type'])
           known = {sig(f, s) for f, items in base.items() for s in items}
           fresh = {f: [s for s in items if sig(f, s) not in known]
                    for f, items in new.items()}
