@@ -51,6 +51,7 @@ docker/docker-compose.override.yml
 
 # CI secret-scan output
 secrets.json
+new_secrets.json
 
 # Explicit: real env files (belt-and-braces next to wizard output)
 docker/.env
