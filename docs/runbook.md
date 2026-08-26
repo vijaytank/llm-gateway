@@ -1,13 +1,21 @@
 # LLM Gateway — Operational Runbook
 
 Procedures for a self-hosting operator. All commands run from the repo root
-(`llm-gateway/`) unless noted. Docker stack commands use both compose files:
+unless noted.
+
+**Production** stack:
 
 ```bash
-docker compose -f docker/docker-compose.yml -f tests/integration/docker-compose.testing.yml --profile full --profile testing <cmd>
+docker compose -f docker/docker-compose.yml --profile full <cmd>
 ```
 
-For production, drop the testing overlay and keep `--profile full`.
+**Development/testing** adds an overlay with mock providers and test hooks:
+
+```bash
+docker compose -f docker/docker-compose.yml \
+               -f tests/integration/docker-compose.testing.yml \
+               --profile full --profile testing <cmd>
+```
 
 ---
 
@@ -110,7 +118,7 @@ Hourly/daily aggregates are separate tables (`model_stats_hourly`,
 
 4. Watch the first minute of logs for callback-registration failures — a
    silent "no logs written" symptom means the CustomLogger inheritance broke
-   in the new version (known pitfall; see docs/dependency-audit.md).
+   in the new version (known pitfall; see the dependency audit notes).
 5. Run the unit suite before deploying further: `python -m pytest tests/unit -q`.
 
 Rollback: revert the pin and rebuild.

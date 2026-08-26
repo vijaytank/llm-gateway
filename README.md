@@ -1,163 +1,103 @@
-# LLM Gateway — Unified Free-First Routing
+# LLM Gateway
 
 [![Unit tests](https://github.com/vijaytank/llm-gateway/actions/workflows/unit.yml/badge.svg?branch=develop)](https://github.com/vijaytank/llm-gateway/actions/workflows/unit.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 
-A self-hosted gateway that routes OpenAI-format requests across free cloud LLM
-providers (NVIDIA NIM, Groq, Cerebras, OpenRouter) plus local models
-(Ollama/vLLM) and user-defined custom providers, with static fallback chains,
-metadata logging to Postgres, live routing state in Redis, an Anthropic
-inbound adapter for Claude Code / Anthropic SDK tools, and a server-rendered
-web UI for status, stats, and provider management.
+**One OpenAI-compatible endpoint for every free LLM provider — with automatic failover, scoring-based routing, and local fallback.**
 
-**Status:** Phases 0–5 COMPLETE. Post-completion architecture review
-(`docs/architecture-review.md`) remediated 2025-08-25 — see CHANGELOG.md.
+LLM Gateway sits between your app and free-tier LLM providers (NVIDIA NIM,
+Groq, Cerebras, OpenRouter) plus your local models (Ollama / vLLM). Each
+request is routed to the best available provider; failing providers are
+circuit-broken automatically; if the internet goes down, routing falls back
+to local models. An Anthropic-compatible adapter lets tools like Claude Code
+use the same pool.
 
-| Phase | Scope | Status |
-|---|---|---|
-| 0 | Schema, migrations, infrastructure | ✅ |
-| 1 | Core gateway (static routing, cloud free) | ✅ |
-| 2 | Routing brain (stream reader, scorer, circuit breaker) | ✅ |
-| 3 | Local models & offline detection | ✅ |
-| 4 | Setup wizard, web UI, multi-mode deployment | ✅ |
-| 5 | Hardening & observability (throttles, provider circuits, /metrics) | ✅ |
-| Review remediation | Security/routing/reliability fixes per docs/architecture-review.md | ✅ |
+## Why
 
-## Overview
+Free LLM tiers are individually rate-limited and flaky. Used alone they hit
+429s constantly. LLM Gateway combines them into one reliable endpoint:
 
-The gateway exposes an OpenAI-compatible endpoint and picks the best available
-free provider per request: a scoring brain (success rate 0.40 / latency 0.35 /
-quota headroom 0.25) ranks models in Redis, circuit breakers pull failing
-providers out of the chain, and offline detection falls back to local models.
-
-| Service | Port | Purpose |
-|---------|------|---------|
-| LiteLLM Proxy | 4000 | OpenAI-compatible endpoint, static fallback chains |
-| Anthropic Adapter | 4001 | `/v1/messages` → OpenAI translation (tools, images, streaming) |
-| Web UI | 4002 | Dashboard, provider management, stats, request logs (FastAPI + Jinja2) |
-| Routing Brain | (same container) | Redis stream consumer, scoring, circuit breakers, health scheduler |
-| Postgres | 5432 | Model registry, request logs, stats, UI settings |
-| Redis | 6379 | Live routing state, request stream, cooldown TTLs |
-
-## Repository Layout
-
-```
-llm-gateway/
-├── adapter/            # Anthropic Inbound Adapter (FastAPI, port 4001)
-│   ├── translation.py  #   Anthropic ↔ OpenAI: system, tools, images, stop reasons, streaming
-│   ├── schemas.py      #   Wire-format Pydantic models
-│   └── server.py       #   POST /v1/messages, GET /health
-├── brain/              # Routing Brain (separate process, same container — Issue 9)
-│   ├── config.py       #   Versioned thresholds (Issue 5 defaults)
-│   ├── stream_reader.py#   XREADGROUP consumer on gateway:requests:stream
-│   ├── scorer.py       #   score = 0.40*success + 0.35*latency + 0.25*quota
-│   ├── circuit_breaker.py # closed/open/half_open state machine, TTL cooldowns
-│   ├── health_scheduler.py # Adaptive probes, jitter, exponential backoff
-│   └── main.py         #   supervisord entrypoint (runs reader + scheduler)
-├── gateway/            # LiteLLM integration
-│   ├── config_generator.py # GatewayConfig + registry → LiteLLM model_list YAML
-│   ├── callbacks.py    #   CustomLogger → Postgres request_logs + Redis stream
-│   ├── health_startup.py #  3-wave staggered startup probes (0-30s/30-60s/60-120s)
-│   ├── router_hook.py  #   Reads scores/circuit state from Redis (fail-safe)
-│   └── main.py         #   Container entrypoint: boot order → config → LiteLLM
-├── schemas/            # Canonical contracts (Phase 0)
-│   ├── config.py       #   GatewayConfig Pydantic v2 — single source of truth
-│   │                   #   + CustomProviderConfig (Phase 4 custom providers)
-│   └── db.py           #   SQLAlchemy: model_registry, request_logs, stats, ui_settings
-├── migrations/         # Alembic migrations (001_initial_schema, 002_add_ui_settings)
-├── alembic/            # Alembic env + versions (DATABASE_URL from env)
-├── scripts/            # seed_model_registry.py (idempotent upserts)
-├── wizard/             # Phase 4 setup wizard + service installers
-│   ├── setup.py        #   7-question CLI wizard (.env chmod 600, config validation,
-│   │                   #   live-probed custom providers, UI password, install step)
-│   ├── provider_probe.py # Shared live probe (/v1/models + Issue-4 chat probe) — used by wizard AND UI
-│   ├── install_linux.py#   systemd user unit installer
-│   ├── install_macos.py#   LaunchAgent plist installer
-│   └── install_windows.py # Docker Desktop guidance (Issue 13 MVP scope)
-├── ui/                 # Web UI (FastAPI + Jinja2 SSR, port 4002 — no JS bundler)
-│   ├── app.py          #   Dashboard / providers / stats / logs / auth / setup
-│   ├── auth.py         #   bcrypt admin password (ui_settings), signed-cookie sessions (24h)
-│   └── templates/      #   base/dashboard/login/setup/providers/stats/logs
-├── docker/             # docker-compose.yml (core/full profiles), Dockerfiles, supervisord conf
-├── tests/{unit,integration,contract}/
-└── docs/               # repo-audit.md, dependency-audit.md
-```
-
-## Master Plan Issues — All 14 Resolved
-
-1. ✅ LiteLLM dynamic config → Redis-only routing state; static config.yaml
-2. ✅ Boot-order deadlock → `depends_on: service_healthy` + entrypoint polling
-3. ✅ Anthropic shim → dedicated adapter service (port 4001), full translation
-4. ✅ Health probe → structured payload, 12s timeout, content-filter awareness
-5. ✅ Scoring formula + thresholds → `brain/config.py` + `routing_defaults:`
-6. ✅ Phase order → Foundation → Gateway → Brain → Local → UI → Hardening
-7. ✅ Schema migrations → Alembic, `alembic upgrade head` idempotent
-8. ✅ OpenRouter → RPD=40 effective, HTTP-Referer header, last-resort position
-9. ✅ Routing brain → separate process, same container (supervisord)
-10. ✅ Offline detection → UDP probe + ≥2 provider failures (Phase 3)
-11. ✅ Test strategy → unit/integration/contract suites per phase
-12. ✅ `.env` security → chmod 600, random master key (`sk-litellm-…`)
-13. ✅ Windows → Docker Desktop path; native service post-v1
-14. ✅ Config contract → Pydantic `GatewayConfig.model_validate()`
+- **Fallback chains** — each virtual model (`auto-free`, `auto-code-free`,
+  `auto-reasoning-free`) is an ordered chain across providers.
+- **Score-based routing** — a brain process continuously scores every model:
+  `score = 0.40·success_rate + 0.35·latency + 0.25·quota_headroom`.
+- **Circuit breakers** — 429/5xx/auth failures pull a model out of rotation
+  with tiered cooldowns (10 min / 30 min / 24 h), half-open recovery probing.
+- **Offline detection** — UDP probe + consecutive provider failures flip
+  routing to the local pool automatically.
 
 ## Quick Start
 
+Requirements: [Docker](https://docs.docker.com/get-docker/) and Python 3.11+.
+
 ```bash
-# 1. First-run setup: 7-question wizard — generates .env (chmod 600) +
-#    gateway_config.yaml (validated), probes custom providers live,
-#    sets the UI admin password, optionally installs the background service
+git clone https://github.com/vijaytank/llm-gateway.git
+cd llm-gateway
+
+# 1. Setup wizard — generates .env (chmod 600) + gateway_config.yaml,
+#    probes any custom providers live, sets the UI admin password
 python wizard/setup.py
 
-# 2. Start the full stack (postgres → redis → db-init → gateway → adapter → ui)
-cd docker && docker-compose --profile full up -d
+# 2. Start the stack (postgres → redis → db-init → gateway → adapter → ui)
+cd docker && docker compose --profile full up -d
 #    ...or gateway + adapter only, no UI:
-cd docker && docker-compose --profile core up -d
+cd docker && docker compose --profile core up -d
+```
 
-# 3. Verify
+Verify and use:
+
+```bash
+# Health checks
 curl http://localhost:4000/health/liveliness   # gateway
 curl http://localhost:4001/health              # adapter
 curl http://localhost:4002/health              # web UI
 
-# 4. Web UI — first visit prompts you to create the admin password
-#    http://localhost:4002  (dashboard / providers / stats / logs)
-
-# 5. Send a request (OpenAI format)
+# Send a request (OpenAI format) — source .env first so $LITELLM_MASTER_KEY is set
+source ../.env   # or: export $(grep -v '^#' .env | xargs)
 curl http://localhost:4000/v1/chat/completions \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H "Content-Type: application/json" \
   -d '{"model": "auto-free", "messages": [{"role": "user", "content": "Hello"}]}'
 
-# 6. Anthropic SDK tools: set ANTHROPIC_BASE_URL=http://localhost:4001
+# Anthropic SDK / Claude Code: point it at the adapter
+export ANTHROPIC_BASE_URL=http://localhost:4001
 ```
+
+The web UI at **http://localhost:4002** shows dashboard, stats and request
+logs; the first visit prompts you to create the admin password. Providers can
+be added/removed live from **Providers → Add custom provider** (each entry is
+probed before being saved).
 
 ### Background service (bare metal)
 
 ```bash
 python -m wizard.install_linux    # systemd user unit (Linux)
 python -m wizard.install_macos    # LaunchAgent (macOS)
-python -m wizard.install_windows  # prints Docker Desktop instructions (Issue 13)
+python -m wizard.install_windows  # prints Docker Desktop instructions
 ```
 
-### Migrations (manual / bare metal)
+<details>
+<summary>Manual migrations (bare metal without Docker)</summary>
 
 ```bash
-export DATABASE_URL=postgresql://llm_gateway:pass@localhost:5432/llm_gateway
+export DATABASE_URL=postgresql://llm_gateway:<password>@localhost:5432/llm_gateway
 alembic upgrade head
 python scripts/seed_model_registry.py
 ```
 
-## Custom Providers & Local Models (Phases 3–4)
+</details>
 
-**Local models** — enable `providers.local` in the wizard; Ollama/vLLM models are
-discovered live from their endpoints (`ollama list`, `/v1/models`) and appear
-last in all fallback chains. Offline detection (UDP probe to `1.1.1.1:53` +
-provider-failure count) switches routing to the local pool automatically.
+## Services
 
-**Custom providers** — add any OpenAI-compatible endpoint via the wizard or the
-UI (`Providers → Add custom provider`). The provider is probed live before it is
-saved; a failed probe rejects the entry. Only the API-key *env-var name* is
-stored in config — key values stay in `.env`. Toggling a provider edits the
-canonical `GatewayConfig`, which regenerates the LiteLLM model list on restart.
+| Service | Port | Purpose |
+|---------|------|---------|
+| LiteLLM Proxy | 4000 | OpenAI-compatible endpoint, static fallback chains |
+| Anthropic Adapter | 4001 | `/v1/messages` → OpenAI translation (tools, images, streaming) |
+| Web UI | 4002 | Dashboard, provider management, stats, request logs |
+| Routing Brain | 4003 | Scoring, circuit breakers, health scheduler; serves `/metrics` |
+| Postgres | 5432 | Model registry, request logs, aggregates, UI settings |
+| Redis | 6379 | Live routing state, request stream, cooldown TTLs |
 
 ## Configuration
 
@@ -176,25 +116,58 @@ routing_defaults:
   moving_avg_window: 50
 ```
 
-## Development
+Provider API keys are referenced **by env-var name only** in config
+(`api_key_env`); actual values stay in `.env`. See `.env.example` for the full
+variable list, or let the wizard generate everything.
 
-Requires **Python 3.11+**. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full
-dev-environment setup and PR workflow.
+## Local Models & Custom Providers
+
+- **Local models** — enable `providers.local` in the wizard; Ollama/vLLM
+  models are discovered from their endpoints and placed last in every
+  fallback chain as the offline safety net.
+- **Custom providers** — any OpenAI-compatible endpoint via wizard or UI.
+  A failed live probe rejects the entry. Toggling a provider edits the
+  canonical `GatewayConfig`, which regenerates the LiteLLM model list on
+  restart (~60 s).
+
+## Architecture
+
+```
+client ──OpenAI──▶ LiteLLM Proxy :4000 ──▶ free/local providers
+  │                     │ callbacks                ▲
+  │                     ▼                          │ scores/circuits
+  └─Anthropic──▶ Adapter :4001            Redis :6379 ◀── Brain :4003
+                 (translate /v1/messages)      ▲           (stream reader,
+                                               │            scorer, breakers,
+                                        Postgres :5432      health probes)
+                                       (logs, registry)
+```
+
+Key modules: `gateway/config_generator.py` (registry → LiteLLM YAML),
+`gateway/callbacks.py` (request logging → Postgres + Redis stream),
+`brain/scorer.py` + `brain/circuit_breaker.py` (routing intelligence),
+`adapter/translation.py` (full Anthropic↔OpenAI translation incl. tool use).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for layout details and contracts.
+
+## Development
 
 ```bash
 pip install -r requirements.txt
 pytest tests/unit/           # no network needed
-pytest tests/integration/    # requires docker-compose stack
 ```
 
-## References
+Integration tests need the Docker stack — see
+[CONTRIBUTING.md](CONTRIBUTING.md). CI runs lint, pip-audit, the unit suite
+with a 70% coverage gate, and secret scanning on every push/PR.
 
-- `docs/architecture-review.md` — post-completion review & remediation record
-- `docs/runbook.md` — operator procedures (add/remove provider, circuit resets)
-- `docs/repo-audit.md` — 9 external repos analyzed
-- `docs/dependency-audit.md` — pinned versions, licenses, Enterprise gate check
+## Documentation
+
+- [Runbook](docs/runbook.md) — operator procedures: add/remove providers,
+  reset stuck circuits, backup/export config, troubleshooting table
+- [Changelog](CHANGELOG.md)
+- [Security policy](SECURITY.md) — reporting vulnerabilities
+- [Contributing](CONTRIBUTING.md) · [Code of Conduct](CODE_OF_CONDUCT.md)
 
 ---
 
-**Status:** v1.1.0 — Phases 0–5 complete, architecture-review remediation merged.
 **License:** MIT — see [LICENSE](LICENSE).

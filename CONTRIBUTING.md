@@ -44,7 +44,27 @@ Rules:
 
 ## Project Layout
 
-See the Repository Layout section of the [README](README.md). Key contracts:
+```
+gateway/    LiteLLM integration: config_generator.py (registry → LiteLLM YAML),
+            callbacks.py (logging → Postgres + Redis stream), health_startup.py,
+            router_hook.py (reads scores/circuits from Redis), main.py (entrypoint)
+brain/      Routing brain: scorer.py (0.40/0.35/0.25 formula), circuit_breaker.py,
+            provider_circuit.py, stream_reader.py (XREADGROUP consumer),
+            health_scheduler.py, aggregator.py, metrics.py, main.py (supervisord)
+adapter/    Anthropic inbound adapter: translation.py (full Anthropic↔OpenAI),
+            schemas.py (wire models), server.py (POST /v1/messages)
+ui/         Web UI (FastAPI + Jinja2 SSR): app.py, auth.py (bcrypt + signed
+            cookies), rate_limit.py, templates/
+wizard/     setup.py (CLI wizard), provider_probe.py (shared live probe),
+            install_{linux,macos,windows}.py (service installers)
+schemas/    config.py (GatewayConfig Pydantic v2), db.py (SQLAlchemy tables)
+alembic/    Migrations; scripts/ seed_model_registry.py, config_backup.py
+docker/     docker-compose.yml (core/full profiles), Dockerfiles, supervisord conf
+tests/      unit/ (no network) · integration/ (compose overlay stack)
+docs/       runbook.md (operator procedures)
+```
+
+Key contracts:
 
 - `schemas/config.py` (`GatewayConfig`, Pydantic v2) is the single source of
   truth for configuration — validate changes through

@@ -6,7 +6,7 @@ versioning follows [SemVer](https://semver.org/).
 
 ## [1.1.0] — 2025-08-25 — Architecture Review Remediation
 
-Full review document: `docs/architecture-review.md`.
+Internal architecture-review document (not included in the public repo).
 
 ### Security
 - **(F-C1)** Removed committed `docker/.env` from git tracking and disk; added
@@ -96,7 +96,7 @@ Full review document: `docs/architecture-review.md`.
 
 ## [1.0.0] — 2025-08-24 — Phases 0–5 complete
 
-Initial feature-complete implementation per llm-gateway-final-plan.md:
+Initial feature-complete implementation (Phases 0–5):
 schema/migrations, core gateway, routing brain, local models & offline
 detection, setup wizard + web UI, hardening (half-open throttle,
 provider-level circuit, /metrics, config backup, login rate limit).
