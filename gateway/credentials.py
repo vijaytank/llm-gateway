@@ -26,6 +26,27 @@ _cache: dict[str, dict] = {}
 _cache_lock = threading.Lock()
 
 
+_db_engine = None
+_db_session_factory = None
+_db_engine_lock = threading.Lock()
+
+
+def _get_session_factory():
+    global _db_engine, _db_session_factory
+    url = os.environ.get("GATEWAY_DB_URL") or os.environ.get("DATABASE_URL", "")
+    if not url:
+        return None
+    with _db_engine_lock:
+        if _db_engine is None or getattr(_db_engine, "_saved_url", None) != url:
+            from sqlalchemy import create_engine
+            from sqlalchemy.orm import sessionmaker
+
+            _db_engine = create_engine(url, pool_pre_ping=True)
+            _db_engine._saved_url = url
+            _db_session_factory = sessionmaker(bind=_db_engine)
+    return _db_session_factory
+
+
 def _read_from_db(provider_name: str) -> Optional[str]:
     """Return the decrypted key for a provider, or None if absent/unreachable.
 
@@ -33,15 +54,12 @@ def _read_from_db(provider_name: str) -> Optional[str]:
     DB is unavailable (degraded mode, unit-test isolation).
     """
     try:
-        from sqlalchemy import create_engine
-        from sqlalchemy.orm import Session
         from schemas.db import ProviderCredential, decrypt_api_key
 
-        url = os.environ.get("GATEWAY_DB_URL") or os.environ.get("DATABASE_URL", "")
-        if not url:
+        session_factory = _get_session_factory()
+        if session_factory is None:
             return None
-        engine = create_engine(url)
-        with Session(engine) as session:
+        with session_factory() as session:
             row = (
                 session.query(ProviderCredential)
                 .filter_by(provider_name=provider_name, is_active=True)

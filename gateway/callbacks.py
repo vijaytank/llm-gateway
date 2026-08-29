@@ -100,7 +100,7 @@ class CustomLogger(_LiteLLMCustomLogger):
             postgres_dsn
             or os.environ.get("GATEWAY_DB_URL")
             or os.environ.get("DATABASE_URL")
-            or "postgresql://llm_gateway:***@postgres:5432/llm_gateway"
+            or ""
         )
         self._pg_conn = None
     
@@ -302,44 +302,6 @@ class CustomLogger(_LiteLLMCustomLogger):
             "actual_model": actual or "",
             "provider": (model_info.get("provider") if isinstance(model_info, dict) else "") or "",
         }
-
-    def _latency_ms(self, start_time, end_time) -> int:
-        if start_time and end_time:
-            try:
-                return int((end_time - start_time).total_seconds() * 1000)
-            except Exception:
-                return 0
-        return 0
-
-    def _on_success(self, kwargs, response_obj, start_time, end_time) -> None:
-        info = self._model_info(kwargs, response_obj=response_obj)
-        usage = getattr(response_obj, "usage", None)
-        self.record_success(
-            virtual_model=info["virtual_model"],
-            actual_model=info["actual_model"],
-            provider=info["provider"],
-            input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-            output_tokens=getattr(usage, "completion_tokens", 0) or 0,
-            latency_ms=self._latency_ms(start_time, end_time),
-            ttft_ms=0,
-            request_metadata={"model_group": (kwargs or {}).get("model")},
-            response_metadata={},
-        )
-
-    def _on_failure(self, kwargs, response_obj, start_time, end_time) -> None:
-        info = self._model_info(kwargs)
-        exc = (kwargs or {}).get("exception")
-        status_code = getattr(exc, "status_code", None)
-        self.record_failure(
-            virtual_model=info["virtual_model"],
-            actual_model=info["actual_model"],
-            provider=info["provider"],
-            error_code=str(status_code) if status_code else None,
-            error_type=exc.__class__.__name__ if exc else None,
-            latency_ms=self._latency_ms(start_time, end_time),
-            request_metadata={"model_group": (kwargs or {}).get("model")},
-            response_metadata={},
-        )
 
     def _latency_ms(self, start_time, end_time) -> int:
         if start_time and end_time:

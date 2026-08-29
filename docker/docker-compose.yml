@@ -111,6 +111,7 @@ services:
         required: false
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - GATEWAY_REDIS_URL=redis://redis:6379/0
       # Test-mode override: when GATEWAY_CONFIG_PATH points at the integration
       # test config (set by the testing compose file), the gateway boots with
       # mock custom providers. Default remains production config.

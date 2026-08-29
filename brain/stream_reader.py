@@ -13,6 +13,8 @@ Design (per master plan Issue 9):
 """
 
 import json
+import os
+import sys
 import time
 import uuid
 import asyncio
@@ -421,12 +423,11 @@ class StreamReader:
             if not model_name:
                 return
             
-            cb_key = f"gateway:model:{model_name}:circuit"
-            
+            from brain.circuit_breaker import CircuitBreakerManager
+            cb = CircuitBreakerManager(self.redis)
+
             if event.status == "success":
                 # Success: move toward closed state
-                from brain.circuit_breaker import CircuitBreakerManager
-                cb = CircuitBreakerManager(self.redis)
                 cb.transition_to_closed(model_name)
                 return
             if event.status != "error":
@@ -439,9 +440,6 @@ class StreamReader:
             from brain.connectivity_monitor import classify_error
             canonical = classify_error(
                 error_code=event.error_code, error_type=event.error_type)
-            
-            from brain.circuit_breaker import CircuitBreakerManager
-            cb = CircuitBreakerManager(self.redis)
             
             if canonical == "auth_error":
                 # Auth failure: open immediately with the 24-hour cooldown.
@@ -473,7 +471,6 @@ class StreamReader:
 def main():
     """CLI entry point for running the stream reader."""
     import argparse
-    import os
     
     parser = argparse.ArgumentParser(description="LLM Gateway Routing Brain Stream Reader")
     parser.add_argument("--redis-host", type=str, default=os.environ.get("REDIS_HOST", "localhost"))
@@ -505,4 +502,4 @@ def main():
 
 
 if __name__ == "__main__":
-    exit(main())
+    sys.exit(main())

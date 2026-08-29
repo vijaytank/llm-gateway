@@ -59,13 +59,25 @@ def set_password(db: DbSession, password: str) -> None:
     db.commit()
 
 
+_per_boot_secret: bytes | None = None
+_session_secret_warned = False
+
+
 def get_session_secret() -> bytes:
-    secret = os_secret = __import__("os").environ.get(SESSION_SECRET_ENV, "")
+    global _per_boot_secret, _session_secret_warned
+    secret = __import__("os").environ.get(SESSION_SECRET_ENV, "")
     if secret:
         return secret.encode("utf-8")
-    # Random per-boot secret: sessions don't survive restarts unless
-    # SESSION_SECRET is configured. Documented behavior, not silent.
-    return secrets.token_bytes(32)
+    if _per_boot_secret is None:
+        if not _session_secret_warned:
+            import logging
+            logging.getLogger(__name__).warning(
+                "SESSION_SECRET not set — sessions will not survive restarts. "
+                "Set SESSION_SECRET in .env for persistent sessions."
+            )
+            _session_secret_warned = True
+        _per_boot_secret = secrets.token_bytes(32)
+    return _per_boot_secret
 
 
 def create_session_token(username: str = "admin") -> str:

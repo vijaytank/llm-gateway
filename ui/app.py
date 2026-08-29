@@ -280,7 +280,16 @@ def setup_page(request: Request):
 
 @app.post("/setup")
 def setup_submit(request: Request, password: str = Form(...), confirm: str = Form(...)):
+    limiter = _get_login_limiter()
+    client_ip = _login_limiter_client_ip(request)
+    if not limiter.check_allowed(client_ip):
+        return templates.TemplateResponse(
+            request, "setup.html",
+            {"error": "Too many attempts. Try again in a minute."},
+            status_code=429,
+        )
     if password != confirm:
+        limiter.record_failure(client_ip)
         return templates.TemplateResponse(
             request, "setup.html",
             {"error": "Passwords do not match."}, status_code=400,
@@ -288,7 +297,9 @@ def setup_submit(request: Request, password: str = Form(...), confirm: str = For
     db = new_db_session()
     try:
         ui_auth.set_password(db, password)
+        limiter.reset(client_ip)
     except ValueError as e:
+        limiter.record_failure(client_ip)
         return templates.TemplateResponse(
             request, "setup.html", {"error": str(e)}, status_code=400,
         )
@@ -505,7 +516,7 @@ def credentials_set(request: Request, name: str, api_key: str = Form(...), db: D
         row.is_active = True
     db.commit()
     invalidate_cache(name)
-    return RedirectResponse(url=f"/credentials?msg=API+key+saved+for+{name}.+Restart+gateway+to+apply.", status_code=303)
+    return RedirectResponse(url=f"/credentials?msg=API+key+saved+for+{name}.", status_code=303)
 
 
 @app.post("/credentials/{name}/delete")
@@ -517,7 +528,7 @@ def credentials_delete(request: Request, name: str, db: DbSession = Depends(get_
         db.delete(row)
         db.commit()
     invalidate_cache(name)
-    return RedirectResponse(url=f"/credentials?msg=API+key+removed+for+{name}.+Restart+gateway+to+apply.", status_code=303)
+    return RedirectResponse(url=f"/credentials?msg=API+key+removed+for+{name}.", status_code=303)
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +540,7 @@ def _update_env_file(key: str, value: str) -> bool:
 
     Returns True if the file was modified, False if the key was not found
     (in which case it is appended). Creates the file if it does not exist.
+    Uses atomic write-to-temp-then-replace.
     """
     targets = [ROOT / ".env"]
     docker_env = ROOT / "docker" / ".env"
@@ -550,11 +562,16 @@ def _update_env_file(key: str, value: str) -> bool:
                         new_lines.append(line)
                 if not found:
                     new_lines.append(f"{key}={value}")
-                env_path.write_text("\n".join(new_lines) + "\n")
-                modified = True
+                content = "\n".join(new_lines) + "\n"
             elif env_path.parent.exists():
-                env_path.write_text(f"{key}={value}\n")
-                modified = True
+                content = f"{key}={value}\n"
+            else:
+                continue
+
+            tmp_path = env_path.with_name(f"{env_path.name}.tmp.{os.getpid()}")
+            tmp_path.write_text(content)
+            tmp_path.replace(env_path)
+            modified = True
         except Exception:
             pass
     return modified
