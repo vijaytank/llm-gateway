@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Security — LLM Gateway{% endblock %}
+{% block content %}
+<h1>Security Settings</h1>
+{% if message %}<p class="msg">{{ message }}</p>{% endif %}
+{% if error %}<p class="err">{{ error }}</p>{% endif %}
+<p class="muted">Rotate credentials and secrets. All actions require admin authentication.</p>
+
+<div class="card">
+  <h2>Admin Password</h2>
+  <p class="muted">Status: {{ "configured" if admin_password_set else "not set" }}</p>
+  <form method="post" action="/security/rotate-admin-password">
+    <label>Current password</label>
+    <input type="password" name="current_password" required>
+    <label>New password (min 8 characters)</label>
+    <input type="password" name="new_password" required>
+    <label>Confirm new password</label>
+    <input type="password" name="confirm_password" required>
+    <button type="submit">Change Password</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>LiteLLM Master Key</h2>
+  <p class="muted">Status: {{ "configured" if litellm_master_key_set else "not set" }}</p>
+  <form method="post" action="/security/rotate-master-key">
+    <label>New master key (min 8 characters)</label>
+    <input type="password" name="new_master_key" required>
+    <label>Confirm new master key</label>
+    <input type="password" name="confirm" required>
+    <button type="submit">Rotate Master Key</button>
+  </form>
+  <p class="muted">⚠️ Restart the gateway after rotating the master key.</p>
+</div>
+
+<div class="card">
+  <h2>Session Secret</h2>
+  <p class="muted">Status: {{ "configured" if session_secret_set else "not set" }}</p>
+  <form method="post" action="/security/rotate-session-secret">
+    <button type="submit">Generate New Session Secret</button>
+  </form>
+  <p class="muted">⚠️ This invalidates all existing sessions. Users must log in again. Restart the gateway to apply.</p>
+</div>
+
+<div class="card">
+  <h2>Encryption Key</h2>
+  <p class="muted">Status: {{ "configured" if encryption_key_set else "not set" }}</p>
+  <form method="post" action="/security/rotate-encryption-key">
+    <button type="submit">Rotate Encryption Key</button>
+  </form>
+  <p class="muted">⚠️ Re-encrypts all stored API keys with a new key. This action is atomic — a failure leaves the old key intact.</p>
+</div>
+{% endblock %}

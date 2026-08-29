@@ -29,20 +29,41 @@ Free LLM tiers are individually rate-limited and flaky. Used alone they hit
 
 ## Quick Start
 
-Requirements: [Docker](https://docs.docker.com/get-docker/) and Python 3.11+.
+Requirements: [Docker](https://docs.docker.com/get-docker/) (Python on host is optional).
+
+### Option A: One-Click Startup (Recommended)
 
 ```bash
 git clone https://github.com/vijaytank/llm-gateway.git
 cd llm-gateway
 
-# 1. Setup wizard — generates .env (chmod 600) + gateway_config.yaml,
-#    probes any custom providers live, sets the UI admin password
-python wizard/setup.py
+# Windows (PowerShell):
+.\start-gateway.ps1
 
-# 2. Start the stack (postgres → redis → db-init → gateway → adapter → ui)
-cd docker && docker compose --profile full up -d
-#    ...or gateway + adapter only, no UI:
-cd docker && docker compose --profile core up -d
+# Linux / macOS:
+chmod +x start-gateway.sh && ./start-gateway.sh
+```
+
+The script automatically verifies Docker, initializes random secrets, starts the compose stack, waits for services to be healthy, and opens the Web UI at **http://localhost:4002**.
+
+---
+
+### Option B: Docker Compose
+
+```bash
+git clone https://github.com/vijaytank/llm-gateway.git
+cd llm-gateway/docker
+
+# Start full stack (auto-generates .env with random secrets on first run)
+docker compose --profile full up -d
+```
+
+---
+
+### Option C: CLI Setup Wizard (Bare-metal or Custom Config)
+
+```bash
+python wizard/setup.py
 ```
 
 Verify and use:
@@ -54,7 +75,7 @@ curl http://localhost:4001/health              # adapter
 curl http://localhost:4002/health              # web UI
 
 # Send a request (OpenAI format) — source .env first so $LITELLM_MASTER_KEY is set
-source ../.env   # or: export $(grep -v '^#' .env | xargs)
+source .env   # or: export $(grep -v '^#' .env | xargs)
 curl http://localhost:4000/v1/chat/completions \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
   -H "Content-Type: application/json" \
@@ -64,10 +85,7 @@ curl http://localhost:4000/v1/chat/completions \
 export ANTHROPIC_BASE_URL=http://localhost:4001
 ```
 
-The web UI at **http://localhost:4002** shows dashboard, stats and request
-logs; the first visit prompts you to create the admin password. Providers can
-be added/removed live from **Providers → Add custom provider** (each entry is
-probed before being saved).
+The web UI at **http://localhost:4002** allows you to configure your provider API keys (stored encrypted in Postgres at `/credentials`), rotate keys and secrets (`/security`), and inspect real-time routing metrics.
 
 ### Background service (bare metal)
 

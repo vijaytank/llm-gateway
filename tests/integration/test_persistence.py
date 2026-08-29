@@ -12,8 +12,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from conftest import (  # noqa: E402
-    compose, gateway_chat, pg_query, service_health, wait_service_healthy,
-    wait_until,
+    brain_running, compose, gateway_chat, pg_query, service_health,
+    wait_service_healthy, wait_until,
 )
 
 
@@ -36,6 +36,7 @@ def test_request_logs_survive_gateway_restart(docker_stack):
                timeout=180, interval=5.0, desc="gateway healthy after restart")
     wait_until(lambda: service_health("ui") == "healthy",
                timeout=180, interval=5.0, desc="ui healthy after restart")
+    wait_until(brain_running, timeout=60, desc="brain running after restart")
 
     after = _count_rows()
     assert after >= before, f"lost logs across restart: {before} -> {after}"
@@ -53,6 +54,7 @@ def test_registry_survives_full_down_up_with_volumes():
 
     for svc in ("postgres", "redis", "gateway", "adapter", "ui", "mock-provider"):
         wait_service_healthy(svc, timeout=120)
+    wait_until(brain_running, timeout=60, desc="brain running after down/up")
 
     registry_after = int(pg_query("SELECT COUNT(*) FROM model_registry", fetch="one"))
     assert registry_after == registry_before, \

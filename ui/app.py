@@ -22,8 +22,10 @@ No mock data anywhere.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -36,7 +38,7 @@ from sqlalchemy.orm import Session as DbSession, sessionmaker
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from schemas.config import GatewayConfig, CustomProviderConfig
+from schemas.config import GatewayConfig, CustomProviderConfig, BUILTIN_PROVIDERS
 from schemas.db import (
     Base,
     ModelRegistry,
@@ -46,6 +48,7 @@ from schemas.db import (
     UiSetting,
     decrypt_api_key,
     encrypt_api_key,
+    rotate_encryption_key,
 )
 from ui import auth as ui_auth
 from wizard.provider_probe import list_models, probe_provider
@@ -58,6 +61,8 @@ app = FastAPI(title="LLM Gateway UI", docs_url=None, redoc_url=None)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Database / Redis wiring (env-driven, no hardcoded URLs)
@@ -103,7 +108,16 @@ def get_redis():
 # Phase 5 security: shared login rate limiter (5 failures/min → 429).
 from ui.rate_limit import LoginRateLimiter, client_ip_from_request  # noqa: E402
 
-_login_limiter = LoginRateLimiter(redis_client=get_redis())
+# Lazily initialized on first login request so Redis unavailability at startup
+# does not prevent the module from importing (e.g. test collection, bare-metal starts).
+_login_limiter: LoginRateLimiter | None = None
+
+
+def _get_login_limiter() -> LoginRateLimiter:
+    global _login_limiter
+    if _login_limiter is None:
+        _login_limiter = LoginRateLimiter(redis_client=get_redis())
+    return _login_limiter
 
 
 def _login_limiter_client_ip(request: Request) -> str:
@@ -134,6 +148,17 @@ def save_gateway_config(config: GatewayConfig) -> None:
 # ---------------------------------------------------------------------------
 
 PUBLIC_PATHS = {"/login", "/setup", "/health"}
+
+
+def require_admin(request: Request):
+    """Dependency that enforces admin authentication (P1.3).
+
+    Returns 403 for API-style endpoints (vs the middleware's redirect to /login).
+    Use on POST routes where a redirect is not appropriate.
+    """
+    token = request.cookies.get(ui_auth.SESSION_COOKIE_NAME, "")
+    if not token or ui_auth.validate_session_token(token) is None:
+        raise HTTPException(status_code=403, detail="Admin authentication required")
 
 
 @app.middleware("http")
@@ -206,8 +231,9 @@ def login_page(request: Request):
 @app.post("/login")
 def login_submit(request: Request, password: str = Form(...)):
     # Phase 5 security: rate-limit login attempts (5 failures/min → 429).
+    limiter = _get_login_limiter()
     client_ip = _login_limiter_client_ip(request)
-    if not _login_limiter.check_allowed(client_ip):
+    if not limiter.check_allowed(client_ip):
         return templates.TemplateResponse(
             request, "login.html",
             {"error": "Too many login attempts. Try again in a minute."},
@@ -217,12 +243,12 @@ def login_submit(request: Request, password: str = Form(...)):
     try:
         if not ui_auth.authenticate(db, password):
             # Phase 5: failed attempt feeds the sliding-window limiter.
-            _login_limiter.record_failure(client_ip)
+            limiter.record_failure(client_ip)
             return templates.TemplateResponse(
                 request, "login.html", {"error": "Invalid password."},
                 status_code=401,
             )
-        _login_limiter.reset(client_ip)
+        limiter.reset(client_ip)
         token = ui_auth.create_session_token()
         resp = RedirectResponse(url="/", status_code=303)
         resp.set_cookie(
@@ -243,7 +269,7 @@ def logout():
 
 @app.get("/setup", response_class=HTMLResponse)
 def setup_page(request: Request):
-    db = _SessionLocal()
+    db = new_db_session()
     try:
         if not ui_auth.needs_setup(db):
             return RedirectResponse(url="/login", status_code=303)
@@ -253,7 +279,7 @@ def setup_page(request: Request):
 
 
 @app.post("/setup")
-def setup_submit(password: str = Form(...), confirm: str = Form(...)):
+def setup_submit(request: Request, password: str = Form(...), confirm: str = Form(...)):
     if password != confirm:
         return templates.TemplateResponse(
             request, "setup.html",
@@ -273,11 +299,24 @@ def setup_submit(password: str = Form(...), confirm: str = Form(...)):
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, db: DbSession = Depends(get_db)):
-    rows = db.execute(select(ModelRegistry).order_by(ModelRegistry.provider, ModelRegistry.model_name)).scalars().all()
-    r = get_redis()
+    rows = []
+    db_error = False
+    try:
+        rows = db.execute(select(ModelRegistry).order_by(ModelRegistry.provider, ModelRegistry.model_name)).scalars().all()
+    except Exception:
+        logger.warning("dashboard: failed to query ModelRegistry", exc_info=True)
+        db_error = True
+
+    try:
+        r = get_redis()
+    except Exception:
+        r = None
+
     models = []
     for row in rows:
-        entry = model_status_from_redis(r, f"{row.provider}/{row.model_name}")
+        entry = model_status_from_redis(r, f"{row.provider}/{row.model_name}") if r else {
+            "status": "unknown", "circuit": "unknown", "score": None, "last_success": None
+        }
         models.append({
             "provider": row.provider,
             "model_name": row.model_name,
@@ -287,8 +326,27 @@ def dashboard(request: Request, db: DbSession = Depends(get_db)):
             **entry,
             "color": health_color(entry),
         })
+
+    # Check if any credentials are configured (UX-0.3 first-visit guidance)
+    has_credentials = False
+    try:
+        creds = db.execute(select(ProviderCredential)).scalars().all()
+        if creds:
+            has_credentials = True
+    except Exception:
+        logger.warning("dashboard: failed to query ProviderCredential", exc_info=True)
+
+    if not has_credentials:
+        for name in BUILTIN_PROVIDERS:
+            env_key = f"{name.upper()}_API_KEY"
+            if os.environ.get(env_key):
+                has_credentials = True
+                break
+
     return templates.TemplateResponse(request, "dashboard.html", {
         "models": models,
+        "has_credentials": has_credentials,
+        "db_error": db_error,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
     })
 
@@ -319,7 +377,7 @@ def providers_page(request: Request):
 
 
 @app.post("/providers/add")
-async def providers_add(
+def providers_add(
     name: str = Form(...),
     base_url: str = Form(...),
     api_key_env: str = Form(""),
@@ -368,7 +426,7 @@ async def providers_add(
 
 def providers_add_error(message: str):
     return RedirectResponse(
-        url=f"/providers?msg={message.replace(' ', '+').replace(':', '')}",
+        url=f"/providers?msg={urllib.parse.quote_plus(message)}",
         status_code=303,
     )
 
@@ -390,7 +448,7 @@ def provider_toggle(name: str):
 # ---------------------------------------------------------------------------
 
 # Provider display order (builtin first), matching the dashboard/provider pages.
-_CRED_PROVIDERS = ["nvidia", "groq", "cerebras", "openrouter"]
+_CRED_PROVIDERS = BUILTIN_PROVIDERS
 
 
 def _mask_api_key(key: str) -> str:
@@ -403,36 +461,28 @@ def _mask_api_key(key: str) -> str:
     return f"{key[:4]}****{key[-4:]}"
 
 
+def _build_provider_cred_entry(name: str, row) -> dict:
+    """Build a display dict for one provider credential (masked, never full key)."""
+    configured = row is not None
+    masked = ""
+    if configured:
+        try:
+            masked = _mask_api_key(decrypt_api_key(row.api_key_encrypted))
+        except Exception:
+            masked = "****"
+    return {"name": name, "configured": configured, "masked": masked}
+
+
 @app.get("/credentials", response_class=HTMLResponse)
 def credentials_page(request: Request, db: DbSession = Depends(get_db)):
     """List builtin providers and their configured status (masked, never full)."""
     rows = db.execute(select(ProviderCredential)).scalars().all()
     creds = {r.provider_name: r for r in rows}
-    providers = []
-    for name in _CRED_PROVIDERS:
-        row = creds.get(name)
-        configured = row is not None
-        masked = ""
-        if configured:
-            masked = _mask_api_key(decrypt_api_key(row.api_key_encrypted))
-        providers.append({
-            "name": name,
-            "configured": configured,
-            "masked": masked,
-        })
+    providers = [_build_provider_cred_entry(name, creds.get(name)) for name in _CRED_PROVIDERS]
     # Custom providers (from canonical config) get the same treatment.
     config = load_gateway_config()
     for cp in config.custom_providers:
-        row = creds.get(cp.name)
-        configured = row is not None
-        masked = ""
-        if configured:
-            masked = _mask_api_key(decrypt_api_key(row.api_key_encrypted))
-        providers.append({
-            "name": cp.name,
-            "configured": configured,
-            "masked": masked,
-        })
+        providers.append(_build_provider_cred_entry(cp.name, creds.get(cp.name)))
     return templates.TemplateResponse(request, "credentials.html", {
         "providers": providers,
         "message": request.query_params.get("msg", ""),
@@ -440,8 +490,9 @@ def credentials_page(request: Request, db: DbSession = Depends(get_db)):
 
 
 @app.post("/credentials/{name}")
-def credentials_set(name: str, api_key: str = Form(...), db: DbSession = Depends(get_db)):
+def credentials_set(request: Request, name: str, api_key: str = Form(...), db: DbSession = Depends(get_db)):
     """Store (or update) an encrypted API key for a provider (FR-1.2.1)."""
+    require_admin(request)
     if not name.strip() or not api_key.strip():
         raise HTTPException(status_code=400, detail="provider name and api_key are required")
     row = db.execute(select(ProviderCredential).where(ProviderCredential.provider_name == name)).scalar_one_or_none()
@@ -454,18 +505,189 @@ def credentials_set(name: str, api_key: str = Form(...), db: DbSession = Depends
         row.is_active = True
     db.commit()
     invalidate_cache(name)
-    return RedirectResponse(url=f"/credentials?msg=API+key+saved+for+{name}", status_code=303)
+    return RedirectResponse(url=f"/credentials?msg=API+key+saved+for+{name}.+Restart+gateway+to+apply.", status_code=303)
 
 
 @app.post("/credentials/{name}/delete")
-def credentials_delete(name: str, db: DbSession = Depends(get_db)):
+def credentials_delete(request: Request, name: str, db: DbSession = Depends(get_db)):
     """Remove a stored credential for a provider (FR-1.2.6 / AC-SEC-06)."""
+    require_admin(request)
     row = db.execute(select(ProviderCredential).where(ProviderCredential.provider_name == name)).scalar_one_or_none()
     if row is not None:
         db.delete(row)
         db.commit()
     invalidate_cache(name)
-    return RedirectResponse(url=f"/credentials?msg=API+key+removed+for+{name}", status_code=303)
+    return RedirectResponse(url=f"/credentials?msg=API+key+removed+for+{name}.+Restart+gateway+to+apply.", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# Security Settings (P1.3) — credential rotation.
+# ---------------------------------------------------------------------------
+
+def _update_env_file(key: str, value: str) -> bool:
+    """Update a key=value pair in the project-root .env file (and docker/.env if present).
+
+    Returns True if the file was modified, False if the key was not found
+    (in which case it is appended). Creates the file if it does not exist.
+    """
+    targets = [ROOT / ".env"]
+    docker_env = ROOT / "docker" / ".env"
+    if docker_env.parent.exists() and docker_env != targets[0]:
+        targets.append(docker_env)
+
+    modified = False
+    for env_path in targets:
+        try:
+            if env_path.exists():
+                lines = env_path.read_text().splitlines()
+                found = False
+                new_lines = []
+                for line in lines:
+                    if line.startswith(f"{key}="):
+                        new_lines.append(f"{key}={value}")
+                        found = True
+                    else:
+                        new_lines.append(line)
+                if not found:
+                    new_lines.append(f"{key}={value}")
+                env_path.write_text("\n".join(new_lines) + "\n")
+                modified = True
+            elif env_path.parent.exists():
+                env_path.write_text(f"{key}={value}\n")
+                modified = True
+        except Exception:
+            pass
+    return modified
+
+
+@app.get("/security", response_class=HTMLResponse)
+def security_page(request: Request, db: DbSession = Depends(get_db)):
+    """Security Settings page — shows current status of rotatable credentials."""
+    # Check which credentials are configured
+    admin_hash = db.get(UiSetting, ui_auth.PASSWORD_HASH_KEY)
+    env_path = ROOT / ".env"
+    env_configured = {}
+    if env_path.exists():
+        env_content = env_path.read_text()
+        for key in ("LITELLM_MASTER_KEY", "SESSION_SECRET", "SECRET_ENCRYPTION_KEY"):
+            for line in env_content.splitlines():
+                if line.startswith(f"{key}="):
+                    val = line.split("=", 1)[1].strip()
+                    env_configured[key] = bool(val)
+                    break
+            else:
+                env_configured[key] = False
+    return templates.TemplateResponse(request, "security.html", {
+        "admin_password_set": admin_hash is not None,
+        "litellm_master_key_set": env_configured.get("LITELLM_MASTER_KEY", False),
+        "session_secret_set": env_configured.get("SESSION_SECRET", False),
+        "encryption_key_set": env_configured.get("SECRET_ENCRYPTION_KEY", False),
+        "message": request.query_params.get("msg", ""),
+        "error": request.query_params.get("err", ""),
+    })
+
+
+@app.post("/security/rotate-admin-password")
+def security_rotate_admin_password(
+    request: Request,
+    current_password: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+    db: DbSession = Depends(get_db),
+):
+    """Rotate the admin password (FR-1.3.1, AC-P1.3.2)."""
+    require_admin(request)
+    # Verify current password first
+    if not ui_auth.authenticate(db, current_password):
+        return RedirectResponse(
+            url="/security?err=Current+password+is+incorrect", status_code=303
+        )
+    if new_password != confirm_password:
+        return RedirectResponse(
+            url="/security?err=New+passwords+do+not+match", status_code=303
+        )
+    try:
+        ui_auth.set_password(db, new_password)
+    except ValueError as e:
+        return RedirectResponse(url=f"/security?err={str(e).replace(' ', '+')}", status_code=303)
+    return RedirectResponse(url="/security?msg=Admin+password+updated+successfully", status_code=303)
+
+
+@app.post("/security/rotate-master-key")
+def security_rotate_master_key(
+    request: Request,
+    new_master_key: str = Form(...),
+    confirm: str = Form(...),
+):
+    """Rotate the LiteLLM master key (FR-1.3.1, AC-P1.3.3).
+
+    Writes the new key to .env. Gateway restart required to apply.
+    """
+    require_admin(request)
+    if new_master_key != confirm:
+        return RedirectResponse(url="/security?err=Keys+do+not+match", status_code=303)
+    if len(new_master_key) < 8:
+        return RedirectResponse(
+            url="/security?err=Master+key+must+be+at+least+8+characters", status_code=303
+        )
+    if not _update_env_file("LITELLM_MASTER_KEY", new_master_key):
+        return RedirectResponse(
+            url="/security?err=Master+key+rotation+failed:+could+not+write+.env",
+            status_code=303,
+        )
+    return RedirectResponse(
+        url="/security?msg=Master+key+updated.+Restart+gateway+to+apply.",
+        status_code=303,
+    )
+
+
+@app.post("/security/rotate-session-secret")
+def security_rotate_session_secret(request: Request):
+    """Generate a new session secret (FR-1.3.1, AC-P1.3.4).
+
+    Writes the new secret to .env. All existing sessions are invalidated
+    (they were signed with the old secret). Gateway restart required.
+    """
+    require_admin(request)
+    import secrets as _secrets
+    new_secret = _secrets.token_hex(32)
+    if not _update_env_file("SESSION_SECRET", new_secret):
+        return RedirectResponse(
+            url="/security?err=Session+secret+rotation+failed:+could+not+write+.env",
+            status_code=303,
+        )
+    return RedirectResponse(
+        url="/security?msg=Session+secret+updated.+All+sessions+invalidated.+Restart+gateway+to+apply.",
+        status_code=303,
+    )
+
+
+@app.post("/security/rotate-encryption-key")
+def security_rotate_encryption_key(request: Request, db: DbSession = Depends(get_db)):
+    """Rotate the encryption key (FR-1.3.1, AC-P1.3.5).
+
+    Re-encrypts all stored API keys with the new key. The new key is written
+    to .env. Uses the rotate_encryption_key() function from schemas.db.
+    """
+    require_admin(request)
+    from cryptography.fernet import Fernet as _Fernet
+    new_key = _Fernet.generate_key().decode("utf-8")
+    try:
+        rotate_encryption_key(db, new_key)
+    except Exception as e:
+        return RedirectResponse(
+            url=f"/security?err=Key+rotation+failed:+{str(e).replace(' ', '+')}",
+            status_code=303,
+        )
+    if not _update_env_file("SECRET_ENCRYPTION_KEY", new_key):
+        return RedirectResponse(
+            url="/security?err=Encryption+key+written+to+DB+but+.env+update+failed:+update+SECRET_ENCRYPTION_KEY+manually",
+            status_code=303,
+        )
+    return RedirectResponse(
+        url="/security?msg=Encryption+key+rotated.+All+stored+API+keys+re-encrypted.",
+        status_code=303,
+    )
 
 
 @app.get("/stats", response_class=HTMLResponse)

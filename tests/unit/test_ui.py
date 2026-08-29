@@ -131,6 +131,23 @@ def test_dashboard_lists_registry_models(client):
     assert "nvidia" in resp.text
 
 
+def test_dashboard_shows_guidance_when_no_credentials(client, monkeypatch):
+    _login(client)
+    for k in ("NVIDIA_API_KEY", "GROQ_API_KEY", "CEREBRAS_API_KEY", "OPENROUTER_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "Configure API Keys" in resp.text
+
+
+def test_dashboard_omits_guidance_when_credentials_present(client, monkeypatch):
+    _login(client)
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test_key_123")
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "Configure API Keys" not in resp.text
+
+
 def test_dashboard_reflects_circuit_state_from_redis(client, ui_env, monkeypatch):
     _login(client)
 

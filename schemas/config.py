@@ -13,6 +13,12 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.types import SecretStr
 
+# ---------------------------------------------------------------------------
+# Canonical list of built-in cloud providers (ordered: display + routing priority).
+# Import this everywhere instead of repeating the list inline.
+# ---------------------------------------------------------------------------
+BUILTIN_PROVIDERS: list[str] = ["nvidia", "groq", "cerebras", "openrouter"]
+
 
 class ConnectivityConfig(BaseModel):
     """Network connectivity probe settings for offline detection."""
