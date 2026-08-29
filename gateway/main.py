@@ -70,9 +70,19 @@ def main() -> int:
     env_path = os.environ.get("GATEWAY_ENV_PATH", ".env")
     check_env_permissions(env_path)
 
-    # 1. Wait for backing services (Issue 2: explicit boot order)
-    _wait_for_postgres()
-    _wait_for_redis()
+    # 1. Wait for backing services (Issue 2: explicit boot order).
+    #    P1.1 degraded mode: if the DB/Redis is unreachable we log and continue
+    #    — the gateway boots with env-var credentials and whatever registry the
+    #    generator can read ([] when DB is down). A full boot kills the whole
+    #    stack on a transient DB restart, which is worse than a partial one.
+    try:
+        _wait_for_postgres()
+    except RuntimeError as e:
+        print(f"[main] WARNING: {e} — starting in degraded mode (no DB-backed registry/credentials)")
+    try:
+        _wait_for_redis()
+    except RuntimeError as e:
+        print(f"[main] WARNING: {e} — starting in degraded mode (no Redis state)")
 
     # 2. Generate LiteLLM config.yaml from GatewayConfig + registry
     import yaml as _yaml
@@ -134,6 +144,8 @@ def main() -> int:
         "--host", "0.0.0.0",
     ]
     env = dict(os.environ)
+    # Ensure LiteLLM's internal prisma layer is not triggered by DATABASE_URL
+    env.pop("DATABASE_URL", None)
     env.setdefault("LITELLM_MASTER_KEY", "")  # real key comes from .env via compose
 
     print(f"[main] Starting LiteLLM on port {port}: {' '.join(cmd)}")

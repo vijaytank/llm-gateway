@@ -46,6 +46,10 @@ SEED_REGISTRY = [
 @pytest.fixture(autouse=True)
 def seeded_registry(monkeypatch):
     monkeypatch.setattr(cg, "_registry_models", lambda: SEED_REGISTRY)
+    # P1.2.3: provider keys now resolve through gateway.credentials with a
+    # process cache — clear it between tests so env overrides are observed.
+    from gateway import credentials as creds
+    creds.invalidate_cache()
 
 
 def test_model_list_contains_all_enabled_providers():

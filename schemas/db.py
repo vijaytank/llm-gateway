@@ -9,6 +9,7 @@ These models define the canonical database schema used by:
 
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -25,6 +26,69 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+
+# Fernet symmetric encryption for provider API keys at rest (P1.2.1). The
+# encryption key comes from SECRET_ENCRYPTION_KEY in .env; if unset we fall
+# back to a per-process key (keys don't survive restart — operator should set
+# it, same contract as SESSION_SECRET).
+try:
+    from cryptography.fernet import Fernet, InvalidToken
+except ImportError:  # pragma: no cover - cryptography is a declared dep
+    Fernet = None  # type: ignore[assignment]
+    InvalidToken = None  # type: ignore[assignment]
+
+_SECRET_ENCRYPTION_KEY_ENV = "SECRET_ENCRYPTION_KEY"
+_process_local_key: Optional[str] = None
+
+
+def _fernet_instance() -> "Fernet":
+    if Fernet is None:  # pragma: no cover
+        raise RuntimeError("cryptography is not installed")
+    global _process_local_key
+    key = os.environ.get(_SECRET_ENCRYPTION_KEY_ENV, "")
+    if not key:
+        # Process-local fallback so keys stay decryptable across calls within
+        # one process (unit tests, quick scripts). Not durable across restarts
+        # — operators should set SECRET_ENCRYPTION_KEY in .env.
+        if _process_local_key is None:
+            _process_local_key = Fernet.generate_key().decode("utf-8")
+        key = _process_local_key
+    return Fernet(key.encode("utf-8"))
+
+
+def encrypt_api_key(plain_key: str) -> str:
+    """Encrypt a provider API key for storage. Returns a Fernet token."""
+    return _fernet_instance().encrypt(plain_key.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_api_key(encrypted: str) -> str:
+    """Decrypt a stored Fernet token back to the plaintext API key."""
+    return _fernet_instance().decrypt(encrypted.encode("utf-8")).decode("utf-8")
+
+
+def rotate_encryption_key(session: "object", new_key: str) -> None:
+    """Re-encrypt every stored credential under a new Fernet key (P1.3).
+
+    `new_key` must be a base64 32-byte Fernet key. Runs in a single DB
+    transaction so a mid-rotation failure leaves no half-encrypted rows.
+    """
+    if Fernet is None:  # pragma: no cover
+        raise RuntimeError("cryptography is not installed")
+    new_fernet = Fernet(new_key.encode("utf-8"))
+    old_fernet = _fernet_instance()
+    from sqlalchemy import select
+
+    rows = session.execute(select(ProviderCredential)).scalars().all()
+    for row in rows:
+        plain = old_fernet.decrypt(row.api_key_encrypted.encode("utf-8")).decode("utf-8")
+        row.api_key_encrypted = new_fernet.encrypt(plain.encode("utf-8")).decode("utf-8")
+    session.commit()
+    # The new key is now the active one: subsequent encrypt/decrypt calls in
+    # this process must use it, or they'd fail with InvalidToken (old key vs
+    # new-encrypted rows). Rotation should also persist the key to .env.
+    os.environ[_SECRET_ENCRYPTION_KEY_ENV] = new_key
+    global _process_local_key
+    _process_local_key = new_key
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -181,6 +245,31 @@ class ModelStatsDaily(Base):
 
     def __repr__(self) -> str:
         return f"<ModelStatsDaily(model={self.model_name}, provider={self.provider}, day={self.day_bucket})>"
+
+
+class ProviderCredential(Base):
+    """Encrypted API key for a provider, stored at rest in Postgres.
+
+    api_key_encrypted holds a Fernet token — never a plaintext key
+    (P1.2.1 deliverable; plan FR-1.2.1, NFR-1.4).
+    """
+
+    __tablename__ = "provider_credentials"
+
+    provider_name: Mapped[str] = mapped_column(
+        String(100), primary_key=True, index=True, nullable=False
+    )
+    api_key_encrypted: Mapped[str] = mapped_column(String(500), nullable=False)
+    is_active: Mapped[bool] = mapped_column(nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<ProviderCredential(provider={self.provider_name})>"
 
 
 class UiSetting(Base):

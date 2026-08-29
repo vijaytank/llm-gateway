@@ -17,6 +17,7 @@ from pydantic import Field
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from gateway.credentials import get_provider_api_key
 from schemas.config import GatewayConfig, create_default_config, ProvidersConfig, VirtualModelConfig, ProviderConfig
 
 
@@ -99,7 +100,8 @@ def get_models_from_registry(config: GatewayConfig) -> list[dict[str, Any]]:
         if not pc.enabled:
             continue
         prefix = PROVIDER_LITELLM_PREFIX[provider_name]
-        api_key = os.environ.get(PROVIDER_API_KEY_ENV[provider_name], "")
+        # DB-backed credential (P1.2.3) with env-var fallback (FR-1.2.4).
+        api_key = get_provider_api_key(provider_name, PROVIDER_API_KEY_ENV[provider_name]) or ""
         provider_models = [m for m in registry if m["provider"] == provider_name]
         for slot in capability_slots:
             candidates = [m for m in provider_models if slot in m["capabilities"]]
@@ -134,7 +136,7 @@ def get_models_from_registry(config: GatewayConfig) -> list[dict[str, Any]]:
     if providers.openrouter.enabled:
         or_models = [m for m in registry if m["provider"] == "openrouter"]
         or_extra = providers.openrouter.extra_headers or {}
-        api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        api_key = get_provider_api_key("openrouter", "OPENROUTER_API_KEY") or ""
         for m in or_models:
             params = {
                 "model": f"openrouter/{m['model_name']}",
@@ -229,7 +231,7 @@ def get_models_from_registry(config: GatewayConfig) -> list[dict[str, Any]]:
             "api_base": cp.base_url,
             "rpm": cp.rpm,
         }
-        api_key = os.environ.get(cp.api_key_env, "") if cp.api_key_env else ""
+        api_key = get_provider_api_key(cp.name, cp.api_key_env) or ""
         if not api_key:
             # LiteLLM's openai/ provider route refuses to build a client
             # without an api_key, even for endpoints that need none. A

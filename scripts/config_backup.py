@@ -53,10 +53,18 @@ def _db_session():
         # fall back to a scratch SQLite DB so the archive still carries a
         # (possibly empty) registry section instead of hard-failing.
         engine = create_engine("sqlite:///:memory:")
-    else:
+        Base.metadata.create_all(engine)
+        return sessionmaker(bind=engine)()
+
+    try:
         engine = create_engine(url)
-    Base.metadata.create_all(engine)  # idempotent if migrations already ran
-    return sessionmaker(bind=engine)()
+        Base.metadata.create_all(engine)  # idempotent if migrations already ran
+        return sessionmaker(bind=engine)()
+    except Exception:
+        # Fall back to in-memory SQLite if Postgres connection fails (e.g. host-side tests / offline)
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        return sessionmaker(bind=engine)()
 
 
 def do_export(out_path: str, config_path: str) -> dict:

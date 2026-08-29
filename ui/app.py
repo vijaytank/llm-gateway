@@ -41,11 +41,18 @@ from schemas.db import (
     Base,
     ModelRegistry,
     ModelStatsHourly,
+    ProviderCredential,
     RequestLog,
     UiSetting,
+    decrypt_api_key,
+    encrypt_api_key,
 )
 from ui import auth as ui_auth
 from wizard.provider_probe import list_models, probe_provider
+
+# P1.2.2: gateway credential cache is invalidated on UI write so the gateway
+# picks up changes without waiting out the 60s TTL.
+from gateway.credentials import invalidate_cache
 
 app = FastAPI(title="LLM Gateway UI", docs_url=None, redoc_url=None)
 
@@ -376,6 +383,89 @@ def provider_toggle(name: str):
             save_gateway_config(config)
             return RedirectResponse(url="/providers?msg=Provider+updated", status_code=303)
     raise HTTPException(status_code=404, detail=f"provider '{name}' not found")
+
+
+# ---------------------------------------------------------------------------
+# API Keys (P1.2.2) — manage provider credentials stored encrypted in Postgres.
+# ---------------------------------------------------------------------------
+
+# Provider display order (builtin first), matching the dashboard/provider pages.
+_CRED_PROVIDERS = ["nvidia", "groq", "cerebras", "openrouter"]
+
+
+def _mask_api_key(key: str) -> str:
+    """Mask a key for display: show first 4 + last 4 chars only (FR-1.2.5).
+    Never returns the full key."""
+    if not key:
+        return ""
+    if len(key) <= 8:
+        return "****"
+    return f"{key[:4]}****{key[-4:]}"
+
+
+@app.get("/credentials", response_class=HTMLResponse)
+def credentials_page(request: Request, db: DbSession = Depends(get_db)):
+    """List builtin providers and their configured status (masked, never full)."""
+    rows = db.execute(select(ProviderCredential)).scalars().all()
+    creds = {r.provider_name: r for r in rows}
+    providers = []
+    for name in _CRED_PROVIDERS:
+        row = creds.get(name)
+        configured = row is not None
+        masked = ""
+        if configured:
+            masked = _mask_api_key(decrypt_api_key(row.api_key_encrypted))
+        providers.append({
+            "name": name,
+            "configured": configured,
+            "masked": masked,
+        })
+    # Custom providers (from canonical config) get the same treatment.
+    config = load_gateway_config()
+    for cp in config.custom_providers:
+        row = creds.get(cp.name)
+        configured = row is not None
+        masked = ""
+        if configured:
+            masked = _mask_api_key(decrypt_api_key(row.api_key_encrypted))
+        providers.append({
+            "name": cp.name,
+            "configured": configured,
+            "masked": masked,
+        })
+    return templates.TemplateResponse(request, "credentials.html", {
+        "providers": providers,
+        "message": request.query_params.get("msg", ""),
+    })
+
+
+@app.post("/credentials/{name}")
+def credentials_set(name: str, api_key: str = Form(...), db: DbSession = Depends(get_db)):
+    """Store (or update) an encrypted API key for a provider (FR-1.2.1)."""
+    if not name.strip() or not api_key.strip():
+        raise HTTPException(status_code=400, detail="provider name and api_key are required")
+    row = db.execute(select(ProviderCredential).where(ProviderCredential.provider_name == name)).scalar_one_or_none()
+    encrypted = encrypt_api_key(api_key)
+    if row is None:
+        row = ProviderCredential(provider_name=name, api_key_encrypted=encrypted)
+        db.add(row)
+    else:
+        row.api_key_encrypted = encrypted
+        row.is_active = True
+    db.commit()
+    invalidate_cache(name)
+    return RedirectResponse(url=f"/credentials?msg=API+key+saved+for+{name}", status_code=303)
+
+
+@app.post("/credentials/{name}/delete")
+def credentials_delete(name: str, db: DbSession = Depends(get_db)):
+    """Remove a stored credential for a provider (FR-1.2.6 / AC-SEC-06)."""
+    row = db.execute(select(ProviderCredential).where(ProviderCredential.provider_name == name)).scalar_one_or_none()
+    if row is not None:
+        db.delete(row)
+        db.commit()
+    invalidate_cache(name)
+    return RedirectResponse(url=f"/credentials?msg=API+key+removed+for+{name}", status_code=303)
 
 
 @app.get("/stats", response_class=HTMLResponse)

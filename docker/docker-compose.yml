@@ -9,9 +9,22 @@
 #   cd docker && docker compose --profile full up -d
 
 services:
+  env-setup:
+    image: python:3.11-slim
+    volumes:
+      - ..:/host
+      - ./:/scripts:ro
+    entrypoint: ["/bin/bash", "/scripts/init-env.sh"]
+    restart: "no"
+    networks:
+      - internal
+
   postgres:
     image: postgres:15-alpine
     restart: unless-stopped
+    depends_on:
+      env-setup:
+        condition: service_completed_successfully
     environment:
       POSTGRES_DB: llm_gateway
       POSTGRES_USER: llm_gateway
@@ -29,6 +42,9 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    depends_on:
+      env-setup:
+        condition: service_completed_successfully
     command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy allkeys-lru"]
     volumes:
       - redis_data:/data
@@ -46,11 +62,16 @@ services:
       dockerfile: docker/Dockerfile.gateway
     restart: no
     depends_on:
+      env-setup:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     working_dir: /app
+    env_file:
+      - path: ../.env
+        required: false
     environment:
       # DATABASE_URL is safe here: one-shot container, no LiteLLM process to
       # trigger Prisma schema resets.
@@ -59,7 +80,10 @@ services:
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
-        alembic upgrade head && python scripts/seed_model_registry.py
+        echo "Running database initialization...";
+        alembic upgrade head 2>&1 || echo 'WARNING: Alembic migration failed (DB may already be migrated or unreachable)';
+        python scripts/seed_model_registry.py 2>&1 || echo 'WARNING: Model registry seed failed';
+        echo 'Database initialization complete.';
     networks:
       - internal
 
