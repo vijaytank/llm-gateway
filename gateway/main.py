@@ -125,7 +125,12 @@ def main() -> int:
                 decode_responses=True,
             )
             if probe_providers:
-                asyncio.run(run_health_checks(probe_providers, redis_client))
+                from gateway.config_generator import _registry_models
+                registry = _registry_models()
+                models_by_provider: dict[str, list[str]] = {}
+                for row in registry:
+                    models_by_provider.setdefault(row["provider"], []).append(row["model_name"])
+                asyncio.run(run_health_checks(probe_providers, redis_client, models_by_provider=models_by_provider))
             else:
                 print("[main] no provider base URLs configured; skipping startup probes")
         except Exception as e:

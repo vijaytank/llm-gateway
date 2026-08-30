@@ -74,6 +74,8 @@ def classify_error(error_code=None, error_type=None, status=None):
             "internalservererror": "server_error",
             "badrequesterror": "invalid_request",
             "invalidrequesterror": "invalid_request",
+            "410": "eol", "gone": "eol", "gonerror": "eol",
+            "404": "not_found", "notfound": "not_found", "notfounderror": "not_found",
         }
         for key, mapped in explicit_map.items():
             if key in et or key == code or key == st:
@@ -81,6 +83,10 @@ def classify_error(error_code=None, error_type=None, status=None):
 
         # Fall back to numeric codes.
         combined = {code, st} - {""}
+        if "410" in combined:
+            return "eol"
+        if "404" in combined:
+            return "not_found"
         if combined & AUTH_ERROR_CODES:
             return "auth_error"
         if "429" in combined:
@@ -92,6 +98,10 @@ def classify_error(error_code=None, error_type=None, status=None):
 
         # String hints (exception names often carry these substrings).
         haystack = f"{et} {code} {st}".lower()
+        if "end of life" in haystack or "eol" in haystack or "decommission" in haystack or "retired" in haystack:
+            return "eol"
+        if "not found" in haystack or "does not exist" in haystack or "unknown model" in haystack:
+            return "not_found"
         if "timeout" in haystack:
             return "timeout"
         if "connect" in haystack or "dns" in haystack or "unreachable" in haystack or "refused" in haystack or "network" in haystack:

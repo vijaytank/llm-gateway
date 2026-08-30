@@ -382,10 +382,22 @@ class CustomLogger(_LiteLLMCustomLogger):
             hook = self._router_hook()
             if hook is None:
                 return data
-            virtual_model = (data or {}).get("model", "")
-            fallback_chain = [virtual_model]
+            requested_model = (data or {}).get("model", "")
+            if not requested_model:
+                return data
+
             influence, reason = hook.influence_model_selection(
-                virtual_model, fallback_chain)
+                requested_model, [requested_model])
+
+            if influence < 0 or reason in ("circuit_open", "offline_mode_cloud_excluded", "local_disabled"):
+                # Model is circuited / permanently failing: resolve live fallback group
+                fallback_target = hook.resolve_fallback_for_model(requested_model)
+                if fallback_target and fallback_target != requested_model:
+                    print(f"[callbacks] Model '{requested_model}' is unavailable ({reason}); rerouting to '{fallback_target}'")
+                    data["model"] = fallback_target
+                    influence, reason = hook.influence_model_selection(
+                        fallback_target, [fallback_target])
+
             if not isinstance(data.get("metadata"), dict):
                 data["metadata"] = {}
             metadata = data["metadata"]

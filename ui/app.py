@@ -359,11 +359,75 @@ def dashboard(request: Request, db: DbSession = Depends(get_db)):
         "has_credentials": has_credentials,
         "db_error": db_error,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "msg": request.query_params.get("msg", ""),
     })
 
 
-@app.get("/providers", response_class=HTMLResponse)
-def providers_page(request: Request):
+@app.post("/models/{provider}/{model_name:path}/toggle")
+def model_toggle(
+    request: Request,
+    provider: str,
+    model_name: str,
+    db: DbSession = Depends(get_db),
+):
+    """Toggle a single model's enabled flag in model_registry."""
+    require_admin(request)
+    provider_decoded = urllib.parse.unquote(provider)
+    model_decoded = urllib.parse.unquote(model_name)
+
+    row = db.execute(
+        select(ModelRegistry).where(
+            ModelRegistry.provider == provider_decoded,
+            ModelRegistry.model_name == model_decoded,
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"model '{provider_decoded}/{model_decoded}' not found")
+    row.enabled = not row.enabled
+    db.commit()
+    action = "enabled" if row.enabled else "disabled"
+    return RedirectResponse(
+        url=f"/?msg={urllib.parse.quote_plus(f'{model_decoded} {action}. Restart gateway to apply.')}",
+        status_code=303,
+    )
+
+
+@app.post("/models/probe")
+def models_probe(request: Request):
+    """Trigger a background re-probe of all providers."""
+    require_admin(request)
+    import asyncio
+    import threading
+    from gateway.health_startup import run_health_checks
+    from gateway.config_generator import _registry_models
+
+    def _run():
+        try:
+            registry = _registry_models()
+            models_by_provider: dict[str, list[str]] = {}
+            for row in registry:
+                models_by_provider.setdefault(row["provider"], []).append(row["model_name"])
+            providers = [
+                {"name": p, "base_url": os.environ.get(f"{p.upper()}_BASE_URL", "")}
+                for p in models_by_provider
+                if os.environ.get(f"{p.upper()}_BASE_URL", "")
+            ]
+            if not providers:
+                return
+            r = get_redis()
+            asyncio.run(run_health_checks(providers, r, models_by_provider=models_by_provider))
+        except Exception as e:
+            logger.warning("models_probe background task failed", exc_info=True)
+
+    threading.Thread(target=_run, daemon=True).start()
+    if "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse(url="/?msg=Health+probes+started+in+background", status_code=303)
+    return JSONResponse({"status": "probe started"}, status_code=202)
+
+
+@app.get("/config", response_class=HTMLResponse)
+def config_page(request: Request, db: DbSession = Depends(get_db)):
+    """Combined Providers + API Keys configuration page."""
     config = load_gateway_config()
     custom = [
         {
@@ -380,11 +444,28 @@ def providers_page(request: Request):
         {"name": name, "config": pc}
         for name, pc in config.providers.model_dump().items()
     ]
-    return templates.TemplateResponse(request, "providers.html", {
+    rows = db.execute(select(ProviderCredential)).scalars().all()
+    creds = {r.provider_name: r for r in rows}
+    providers_creds = [_build_provider_cred_entry(name, creds.get(name)) for name in _CRED_PROVIDERS]
+    for cp in config.custom_providers:
+        providers_creds.append(_build_provider_cred_entry(cp.name, creds.get(cp.name)))
+
+    return templates.TemplateResponse(request, "config.html", {
         "builtin": builtin,
         "custom": custom,
+        "providers": providers_creds,
         "message": request.query_params.get("msg", ""),
     })
+
+
+@app.get("/providers", response_class=HTMLResponse)
+def providers_page(request: Request, db: DbSession = Depends(get_db)):
+    return config_page(request, db)
+
+
+@app.get("/credentials", response_class=HTMLResponse)
+def credentials_page(request: Request, db: DbSession = Depends(get_db)):
+    return config_page(request, db)
 
 
 @app.post("/providers/add")
@@ -432,25 +513,37 @@ def providers_add(
         return providers_add_error(f"Provider '{cp.name}' already exists.")
     config.custom_providers.append(cp)
     save_gateway_config(config)
-    return RedirectResponse(url="/providers?msg=Provider+added+successfully", status_code=303)
+    return RedirectResponse(url="/config?msg=Provider+added+successfully", status_code=303)
 
 
 def providers_add_error(message: str):
     return RedirectResponse(
-        url=f"/providers?msg={urllib.parse.quote_plus(message)}",
+        url=f"/config?msg={urllib.parse.quote_plus(message)}",
         status_code=303,
     )
 
 
 @app.post("/providers/{name}/toggle")
-def provider_toggle(name: str):
-    """Toggle a custom provider's enabled flag in the canonical config."""
+def provider_toggle(request: Request, name: str):
+    """Toggle a custom or builtin provider's enabled flag in the canonical config."""
+    require_admin(request)
     config = load_gateway_config()
     for cp in config.custom_providers:
         if cp.name == name:
             cp.enabled = not cp.enabled
             save_gateway_config(config)
-            return RedirectResponse(url="/providers?msg=Provider+updated", status_code=303)
+            return RedirectResponse(url="/config?msg=Provider+updated", status_code=303)
+
+    if name in BUILTIN_PROVIDERS:
+        pc = getattr(config.providers, name)
+        pc.enabled = not pc.enabled
+        save_gateway_config(config)
+        action = "enabled" if pc.enabled else "disabled"
+        return RedirectResponse(
+            url=f"/config?msg={urllib.parse.quote_plus(f'{name} {action}. Restart gateway to apply.')}",
+            status_code=303,
+        )
+
     raise HTTPException(status_code=404, detail=f"provider '{name}' not found")
 
 
@@ -484,22 +577,6 @@ def _build_provider_cred_entry(name: str, row) -> dict:
     return {"name": name, "configured": configured, "masked": masked}
 
 
-@app.get("/credentials", response_class=HTMLResponse)
-def credentials_page(request: Request, db: DbSession = Depends(get_db)):
-    """List builtin providers and their configured status (masked, never full)."""
-    rows = db.execute(select(ProviderCredential)).scalars().all()
-    creds = {r.provider_name: r for r in rows}
-    providers = [_build_provider_cred_entry(name, creds.get(name)) for name in _CRED_PROVIDERS]
-    # Custom providers (from canonical config) get the same treatment.
-    config = load_gateway_config()
-    for cp in config.custom_providers:
-        providers.append(_build_provider_cred_entry(cp.name, creds.get(cp.name)))
-    return templates.TemplateResponse(request, "credentials.html", {
-        "providers": providers,
-        "message": request.query_params.get("msg", ""),
-    })
-
-
 @app.post("/credentials/{name}")
 def credentials_set(request: Request, name: str, api_key: str = Form(...), db: DbSession = Depends(get_db)):
     """Store (or update) an encrypted API key for a provider (FR-1.2.1)."""
@@ -516,7 +593,7 @@ def credentials_set(request: Request, name: str, api_key: str = Form(...), db: D
         row.is_active = True
     db.commit()
     invalidate_cache(name)
-    return RedirectResponse(url=f"/credentials?msg=API+key+saved+for+{name}.", status_code=303)
+    return RedirectResponse(url=f"/config?msg=API+key+saved+for+{name}.", status_code=303)
 
 
 @app.post("/credentials/{name}/delete")
@@ -528,7 +605,7 @@ def credentials_delete(request: Request, name: str, db: DbSession = Depends(get_
         db.delete(row)
         db.commit()
     invalidate_cache(name)
-    return RedirectResponse(url=f"/credentials?msg=API+key+removed+for+{name}.", status_code=303)
+    return RedirectResponse(url=f"/config?msg=API+key+removed+for+{name}.", status_code=303)
 
 
 # ---------------------------------------------------------------------------
@@ -739,13 +816,54 @@ def stats_page(request: Request, db: DbSession = Depends(get_db)):
 
 
 @app.get("/logs", response_class=HTMLResponse)
-def logs_page(request: Request, db: DbSession = Depends(get_db), page: int = 1):
+def logs_page(
+    request: Request,
+    db: DbSession = Depends(get_db),
+    page: int = 1,
+    status: str = "",
+    provider: str = "",
+    virtual_model: str = "",
+    q: str = "",
+    since: str = "",
+    until: str = "",
+):
     page_size = 50
     page = max(1, page)
-    total = db.execute(select(func.count(RequestLog.id))).scalar() or 0
+
+    base_q = select(RequestLog)
+    count_q = select(func.count(RequestLog.id))
+
+    if status:
+        base_q = base_q.where(RequestLog.status == status)
+        count_q = count_q.where(RequestLog.status == status)
+    if provider:
+        base_q = base_q.where(RequestLog.provider == provider)
+        count_q = count_q.where(RequestLog.provider == provider)
+    if virtual_model:
+        base_q = base_q.where(RequestLog.virtual_model == virtual_model)
+        count_q = count_q.where(RequestLog.virtual_model == virtual_model)
+    if q:
+        pattern = f"%{q}%"
+        base_q = base_q.where(RequestLog.actual_model.ilike(pattern))
+        count_q = count_q.where(RequestLog.actual_model.ilike(pattern))
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since).replace(tzinfo=timezone.utc)
+            base_q = base_q.where(RequestLog.timestamp >= since_dt)
+            count_q = count_q.where(RequestLog.timestamp >= since_dt)
+        except ValueError:
+            pass
+    if until:
+        try:
+            until_dt = datetime.fromisoformat(until).replace(tzinfo=timezone.utc)
+            base_q = base_q.where(RequestLog.timestamp <= until_dt)
+            count_q = count_q.where(RequestLog.timestamp <= until_dt)
+        except ValueError:
+            pass
+
+    total = db.execute(count_q).scalar() or 0
     rows = db.execute(
-        select(RequestLog)
-        .order_by(desc(RequestLog.timestamp))
+        base_q.order_by(desc(RequestLog.timestamp))
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).scalars().all()
@@ -760,12 +878,19 @@ def logs_page(request: Request, db: DbSession = Depends(get_db), page: int = 1):
         "input_tokens": r.input_tokens,
         "output_tokens": r.output_tokens,
     } for r in rows]
+    active_filters = {k: v for k, v in {
+        "status": status, "provider": provider,
+        "virtual_model": virtual_model, "q": q,
+        "since": since, "until": until,
+    }.items() if v}
     return templates.TemplateResponse(request, "logs.html", {
         "entries": entries,
         "page": page,
         "has_prev": page > 1,
         "has_next": page * page_size < total,
         "total": total,
+        "filters": active_filters,
+        "status_choices": ["", "success", "error", "fallback"],
     })
 
 

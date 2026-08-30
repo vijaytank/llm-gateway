@@ -107,30 +107,52 @@ def get_models_from_registry(config: GatewayConfig) -> list[dict[str, Any]]:
             candidates = [m for m in provider_models if slot in m["capabilities"]]
             if not candidates:
                 continue
-            upstream = candidates[0]["model_name"]
-            params: dict[str, Any] = {
+            slot_name = (
+                f"{provider_name}-auto" if provider_name == "nvidia"
+                else f"{provider_name}-auto-free"
+            ) if slot == "general" else f"{provider_name}-{slot}-free"
+            for candidate in candidates:
+                upstream = candidate["model_name"]
+                params: dict[str, Any] = {
+                    "model": f"{prefix}/{upstream}",
+                    "rpm": candidate["rpm"] or 10,
+                }
+                if api_key:
+                    params["api_key"] = api_key
+                if provider_name == "openrouter":
+                    params["extra_headers"] = pc.extra_headers or {}
+                model_list.append({
+                    "model_name": slot_name,
+                    "litellm_params": params,
+                    "model_info": {
+                        "provider": provider_name,
+                        "tier": candidate["tier"],
+                        "capabilities": [slot],
+                        "mode": "chat",
+                    },
+                })
+
+        # Also register each model under its exact model_name for direct client requests
+        for candidate in provider_models:
+            upstream = candidate["model_name"]
+            params = {
                 "model": f"{prefix}/{upstream}",
-                "rpm": candidates[0]["rpm"] or 10,
+                "rpm": candidate["rpm"] or 10,
             }
             if api_key:
                 params["api_key"] = api_key
-            entry: dict[str, Any] = {
-                "model_name": (
-                    f"{provider_name}-auto" if provider_name == "nvidia"
-                    else f"{provider_name}-auto-free"
-                ) if slot == "general"
-                else f"{provider_name}-{slot}-free",
+            if provider_name == "openrouter":
+                params["extra_headers"] = pc.extra_headers or {}
+            model_list.append({
+                "model_name": upstream,
                 "litellm_params": params,
                 "model_info": {
                     "provider": provider_name,
-                    "tier": candidates[0]["tier"],
-                    "capabilities": [slot],
+                    "tier": candidate["tier"],
+                    "capabilities": candidate["capabilities"],
                     "mode": "chat",
                 },
-            }
-            if provider_name == "openrouter":
-                entry["litellm_params"]["extra_headers"] = pc.extra_headers or {}
-            model_list.append(entry)
+            })
 
     # OpenRouter free (last resort per Issue 8): one entry covering general
     if providers.openrouter.enabled:
@@ -259,25 +281,27 @@ def get_models_from_registry(config: GatewayConfig) -> list[dict[str, Any]]:
     # hook reading scores from Redis (Phase 2), with routing_defaults as the
     # static tiebreaker.
     providers_cfg = config.providers
+    virtual_names = {v.name for v in config.virtual_models}
     chain_by_virtual: dict[str, list[str]] = {}
     for vm in config.virtual_models:
         live_chain = []
         for dep_name in vm.fallback_chain:
-            if any(m["model_name"] == dep_name for m in model_list):
+            if any(m["model_name"] == dep_name and m["model_name"] not in virtual_names for m in model_list):
                 live_chain.append(dep_name)
         chain_by_virtual[vm.name] = live_chain
         for dep_name in live_chain:
-            source = next(m for m in model_list if m["model_name"] == dep_name)
-            model_list.append({
-                "model_name": vm.name,
-                "litellm_params": dict(source["litellm_params"]),
-                "model_info": {
-                    "provider": source.get("model_info", {}).get("provider"),
-                    "tier": config.routing_defaults and vm.tier,
-                    "capabilities": vm.capabilities,
-                    "mode": "chat",
-                },
-            })
+            sources = [m for m in model_list if m["model_name"] == dep_name and m["model_name"] not in virtual_names]
+            for source in sources:
+                model_list.append({
+                    "model_name": vm.name,
+                    "litellm_params": dict(source["litellm_params"]),
+                    "model_info": {
+                        "provider": source.get("model_info", {}).get("provider"),
+                        "tier": config.routing_defaults and vm.tier,
+                        "capabilities": vm.capabilities,
+                        "mode": "chat",
+                    },
+                })
         if not live_chain:
             print(f"[config_generator] WARNING: virtual model '{vm.name}' has no live deployments in chain")
 
@@ -354,14 +378,35 @@ def generate_litellm_config(config: GatewayConfig) -> dict[str, Any]:
         router_settings["circuit_breaker_failure_count"] = defaults.circuit_breaker_failure_count
     if hasattr(defaults, 'circuit_breaker_window_seconds'):
         router_settings["circuit_breaker_window_seconds"] = defaults.circuit_breaker_window_seconds
-    
+
+    # Active router retry and cooldown controls:
+    # When a model deployment fails (e.g. 410, 404, 5xx), LiteLLM automatically
+    # retries the request across remaining group members/fallbacks up to num_retries
+    # times and puts the failing deployment into cooldown.
+    router_settings["num_retries"] = 3
+    router_settings["allowed_fails"] = 1
+    router_settings["cooldown_time"] = 5
+
     litellm_config["router_settings"] = router_settings
-    
-    # Virtual names are model GROUPS (multiple deployments share the name),
-    # so LiteLLM's router handles load-balancing and failover natively.
-    # No `fallbacks` section needed for them.
-    litellm_config["fallbacks"] = {}
-    
+
+    # Fallback chains for direct models and slot names to their virtual capability groups
+    fallbacks = []
+    for m in model_list:
+        name = m["model_name"]
+        if name.startswith("auto-"):
+            continue
+        caps = m.get("model_info", {}).get("capabilities", [])
+        if "reasoning" in caps:
+            target_group = "auto-reasoning-free"
+        elif "code" in caps:
+            target_group = "auto-code-free"
+        else:
+            target_group = "auto-free"
+        if target_group in deployment_names and target_group != name:
+            fallbacks.append({name: [target_group]})
+
+    litellm_config["fallbacks"] = fallbacks
+
     return litellm_config
 
 

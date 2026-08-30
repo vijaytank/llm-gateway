@@ -64,13 +64,24 @@ async def test_pre_call_hook_annotates_influence(logger, fake_redis):
 
 
 @pytest.mark.asyncio
-async def test_pre_call_hook_marks_excluded_when_circuit_open(logger, fake_redis):
+async def test_pre_call_hook_marks_excluded_when_all_circuits_open(logger, fake_redis):
     fake_redis.set("gateway:model:m-open:circuit", "open")
+    fake_redis.set("gateway:model:auto-free:circuit", "open")
     data = {"model": "m-open"}
     out = await logger.async_pre_call_hook(None, None, data, "chat_completion")
     assert out["metadata"]["gateway_influence"] == -1
     assert out["metadata"]["gateway_model_excluded"] is True
     assert out["metadata"]["gateway_routing_reason"] == "circuit_open"
+
+
+@pytest.mark.asyncio
+async def test_pre_call_hook_reroutes_circuited_model(logger, fake_redis):
+    """When a model is circuited/EOL, the pre-call hook automatically reroutes to its capability group."""
+    fake_redis.set("gateway:model:meta/llama-3.3-70b-instruct:circuit", "open")
+    data = {"model": "meta/llama-3.3-70b-instruct"}
+    out = await logger.async_pre_call_hook(None, None, data, "chat_completion")
+    assert out["model"] == "auto-reasoning-free"
+    assert out["metadata"]["gateway_influence"] >= 0
 
 
 @pytest.mark.asyncio

@@ -1,10 +1,46 @@
 {% extends "base.html" %}
-{% block title %}Providers — LLM Gateway{% endblock %}
+{% block title %}Config — LLM Gateway{% endblock %}
 {% block content %}
-<h1>Providers</h1>
+<h1>Gateway Configuration</h1>
 {% if message %}<p class="msg">{{ message }}</p>{% endif %}
 
-<h2 style="font-size:1.05rem;">Built-in providers</h2>
+<div class="card" style="margin-bottom: 18px; border-left: 4px solid #f59e0b; background: rgba(245, 158, 11, 0.08); padding: 10px 14px;">
+  <span style="color: #fbbf24; font-weight: 500;">⚠ Note:</span> After updating provider enable/disable states or API keys, restart the gateway service to load changes:
+  <code style="background: rgba(0,0,0,0.3); padding: 2px 6px; border-radius: 4px; color: #f3f4f6;">docker compose restart gateway</code>
+</div>
+
+<h2 style="font-size:1.15rem; margin-top:1.5rem;">API Keys</h2>
+<p class="muted">Keys are stored encrypted in Postgres (Fernet). They are never shown in full after entry — only the first and last 4 characters are displayed.</p>
+
+<table>
+  <thead><tr><th>Provider</th><th>Status</th><th>Stored key</th><th>Update</th><th></th></tr></thead>
+  <tbody>
+    {% for p in providers %}
+    <tr>
+      <td>{{ p.name }}</td>
+      <td>{{ "configured" if p.configured else "not configured" }}</td>
+      <td class="muted">{{ p.masked or "—" }}</td>
+      <td>
+        <form class="inline" method="post" action="/credentials/{{ p.name }}">
+          <input type="password" name="api_key" placeholder="Paste new API key" style="max-width:260px;">
+          <button type="submit">{{ "Update" if p.configured else "Save" }}</button>
+        </form>
+      </td>
+      <td>
+        {% if p.configured %}
+        <form class="inline" method="post" action="/credentials/{{ p.name }}/delete">
+          <button type="submit">Remove</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="muted">No providers configured.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2 style="font-size:1.15rem; margin-top:2rem;">Built-in providers</h2>
 <table>
   <thead><tr><th>Name</th><th>Enabled</th><th>Tier</th><th>Probe timeout (s)</th><th>Notes</th><th>Action</th></tr></thead>
   <tbody>
@@ -28,7 +64,7 @@
   </tbody>
 </table>
 
-<h2 style="font-size:1.05rem; margin-top:1.5rem;">Custom providers</h2>
+<h2 style="font-size:1.15rem; margin-top:2rem;">Custom providers</h2>
 <table>
   <thead><tr><th>Name</th><th>Base URL</th><th>Tier</th><th>Models</th><th>Enabled</th><th>Action</th></tr></thead>
   <tbody>
@@ -51,7 +87,7 @@
   </tbody>
 </table>
 
-<h2 style="font-size:1.05rem; margin-top:1.5rem;">Add custom provider</h2>
+<h2 style="font-size:1.15rem; margin-top:2rem;">Add custom provider</h2>
 <div class="card">
   <p class="muted">The provider is probed live (GET /v1/models, then a chat completion) before it is saved.
      The API key is referenced by environment-variable name only — the key itself never enters the config file.</p>

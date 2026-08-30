@@ -3,6 +3,23 @@
 {% block content %}
 <h1>Request Logs</h1>
 <p class="muted">{{ total }} total entries — metadata only, never prompts/responses.</p>
+
+<form method="get" action="/logs" style="margin-bottom: 1.25rem; display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center;">
+  <select name="status" style="max-width: 140px; padding: 0.35rem 0.5rem;">
+    <option value="">All statuses</option>
+    <option value="success" {% if filters.status == "success" %}selected{% endif %}>success</option>
+    <option value="error" {% if filters.status == "error" %}selected{% endif %}>error</option>
+    <option value="fallback" {% if filters.status == "fallback" %}selected{% endif %}>fallback</option>
+  </select>
+  <input type="text" name="provider" value="{{ filters.provider or '' }}" placeholder="Provider" style="max-width: 120px; padding: 0.35rem 0.5rem;">
+  <input type="text" name="virtual_model" value="{{ filters.virtual_model or '' }}" placeholder="Virtual model" style="max-width: 150px; padding: 0.35rem 0.5rem;">
+  <input type="text" name="q" value="{{ filters.q or '' }}" placeholder="Search model name" style="max-width: 180px; padding: 0.35rem 0.5rem;">
+  <input type="date" name="since" value="{{ filters.since or '' }}" style="padding: 0.35rem 0.5rem;">
+  <input type="date" name="until" value="{{ filters.until or '' }}" style="padding: 0.35rem 0.5rem;">
+  <button type="submit" style="padding: 0.35rem 0.8rem;">Filter</button>
+  <a href="/logs" style="font-size: 0.85rem; color: #6a737d;">Clear</a>
+</form>
+
 <table>
   <thead>
     <tr><th>Time (UTC)</th><th>Virtual model</th><th>Routed to</th><th>Provider</th>
@@ -21,13 +38,13 @@
       <td>{{ e.input_tokens if e.input_tokens is not none else "—" }} / {{ e.output_tokens if e.output_tokens is not none else "—" }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="8" class="muted">No requests logged yet.</td></tr>
+    <tr><td colspan="8" class="muted">No requests matching filter criteria.</td></tr>
     {% endfor %}
   </tbody>
 </table>
 <div class="pager">
-  {% if has_prev %}<a href="/logs?page={{ page - 1 }}">← Newer</a>{% endif %}
+  {% if has_prev %}<a href="/logs?page={{ page - 1 }}{% for k,v in filters.items() %}&{{ k }}={{ v }}{% endfor %}">← Newer</a>{% endif %}
   <span class="muted">Page {{ page }}</span>
-  {% if has_next %}<a href="/logs?page={{ page + 1 }}">Older →</a>{% endif %}
+  {% if has_next %}<a href="/logs?page={{ page + 1 }}{% for k,v in filters.items() %}&{{ k }}={{ v }}{% endfor %}">Older →</a>{% endif %}
 </div>
 {% endblock %}

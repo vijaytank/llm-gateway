@@ -80,11 +80,41 @@ def test_virtual_models_are_model_groups():
         assert len(members) >= 2, f"{vm_name} group should span multiple providers"
         # every chain entry that exists as a deployment is represented in the group
         vm = next(v for v in config.virtual_models if v.name == vm_name)
-        expected = [n for n in vm.fallback_chain
-                    if n in {m["model_name"] for m in cfg["model_list"]}
-                    and not m_is_virtual(n, cfg)]
+        expected = [m for m in cfg["model_list"]
+                    if m["model_name"] in vm.fallback_chain
+                    and not m_is_virtual(m["model_name"], cfg)]
         got = {m["litellm_params"]["model"] for m in members}
         assert len(members) == len(expected), f"{vm_name}: expected {expected}, got {got}"
+
+
+def test_all_capable_models_registered_per_slot():
+    """Both nvidia reasoning models must appear as separate deployments under
+    nvidia-reasoning-free, giving LiteLLM intra-provider failover."""
+    config = create_default_config()
+    models = get_models_from_registry(config)
+    nvidia_reasoning = [
+        m for m in models
+        if m["model_name"] == "nvidia-reasoning-free"
+    ]
+    upstreams = [m["litellm_params"]["model"] for m in nvidia_reasoning]
+    assert len(nvidia_reasoning) == 2, (
+        f"expected 2 nvidia-reasoning-free entries, got {len(nvidia_reasoning)}: {upstreams}"
+    )
+    assert len(set(upstreams)) == 2, "upstream models must be distinct"
+
+
+def test_virtual_group_has_intra_provider_members():
+    """auto-reasoning-free group must have >1 member even if only one
+    provider is enabled — because that provider has multiple matching models."""
+    config = create_default_config()
+    config.providers.groq.enabled = False
+    config.providers.cerebras.enabled = False
+    config.providers.openrouter.enabled = False
+    cfg = generate_litellm_config(config)
+    group = [m for m in cfg["model_list"] if m["model_name"] == "auto-reasoning-free"]
+    assert len(group) >= 2, (
+        "auto-reasoning-free should still have >=2 members from nvidia alone"
+    )
 
 
 def m_is_virtual(name: str, cfg) -> bool:

@@ -231,6 +231,7 @@ async def _run_wave(
     providers: List[Dict[str, Any]],
     redis_client: redis.Redis,
     label: str,
+    models_by_provider: Optional[Dict[str, List[str]]] = None,
 ) -> Dict[str, str]:
     """Probe every provider in the given list and persist status to Redis.
 
@@ -250,26 +251,34 @@ async def _run_wave(
         
         probe_result = await probe_provider(client, base_url, name)
         
-        # Write status to Redis
-        status_key = f"gateway:model:{name}:status"
-        ttl = 7200  # 2 hours
-        
+        # Determine status string
         if probe_result.healthy:
-            redis_client.setex(status_key, ttl, "healthy")
+            status_val = "healthy"
             results[name] = "healthy"
             print(f"  {name}: HEALTHY")
         elif probe_result.classification == "rate_limited":
-            redis_client.setex(status_key, ttl, "rate_limited")
+            status_val = "rate_limited"
             results[name] = "rate_limited"
             print(f"  {name}: RATE_LIMITED")
         elif probe_result.classification == "unauthorized":
-            redis_client.setex(status_key, ttl, "unauthorized")
+            status_val = "unauthorized"
             results[name] = "unauthorized"
             print(f"  {name}: UNAUTHORIZED")
         else:
-            redis_client.setex(status_key, ttl, "unhealthy")
+            status_val = "unhealthy"
             results[name] = "unhealthy"
             print(f"  {name}: UNHEALTHY ({probe_result.classification})")
+        
+        # Write status to Redis with TTL
+        ttl = 7200  # 2 hours
+        model_names = (models_by_provider or {}).get(name)
+        if model_names:
+            for model_name_key in model_names:
+                status_key = f"gateway:model:{name}/{model_name_key}:status"
+                redis_client.setex(status_key, ttl, status_val)
+        else:
+            status_key = f"gateway:model:{name}:status"
+            redis_client.setex(status_key, ttl, status_val)
     
     return results
 
@@ -308,6 +317,7 @@ async def run_health_checks(
     providers: List[Dict[str, Any]],
     redis_client: redis.Redis,
     max_wait_seconds: int = 120,
+    models_by_provider: Optional[Dict[str, List[str]]] = None,
 ) -> Dict[str, str]:
     """
     Run the 3-wave staggered health check sequence.
@@ -326,7 +336,7 @@ async def run_health_checks(
         # Wave 1: critical providers (0-30s)
         wave1_providers = _providers_for_wave(providers, 1)
         if wave1_providers:
-            results.update(await _run_wave(client, wave1_providers, redis_client, "Wave 1 (0-30s): critical providers"))
+            results.update(await _run_wave(client, wave1_providers, redis_client, "Wave 1 (0-30s): critical providers", models_by_provider=models_by_provider))
         
         # Stagger before wave 2
         elapsed = time.time() - start_time
@@ -342,7 +352,7 @@ async def run_health_checks(
         # Wave 2: secondary providers (30-60s)
         wave2_providers = _providers_for_wave(providers, 2)
         if wave2_providers:
-            results.update(await _run_wave(client, wave2_providers, redis_client, "Wave 2 (30-60s): secondary providers"))
+            results.update(await _run_wave(client, wave2_providers, redis_client, "Wave 2 (30-60s): secondary providers", models_by_provider=models_by_provider))
         
         # Stagger before wave 3
         elapsed = time.time() - start_time
@@ -357,7 +367,7 @@ async def run_health_checks(
         # Wave 3: all remaining providers (60-120s)
         wave3_providers = _providers_for_wave(providers, 3)
         if wave3_providers:
-            results.update(await _run_wave(client, wave3_providers, redis_client, "Wave 3 (60-120s): remaining providers"))
+            results.update(await _run_wave(client, wave3_providers, redis_client, "Wave 3 (60-120s): remaining providers", models_by_provider=models_by_provider))
     
     total_elapsed = time.time() - start_time
     print(f"\n=== Health checks complete in {total_elapsed:.1f}s ===")

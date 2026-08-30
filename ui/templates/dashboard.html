@@ -11,22 +11,27 @@
   <a href="/credentials" class="btn" style="display: inline-block; padding: 5px 12px; font-size: 0.85em; background: #2563eb; color: #fff; border-radius: 4px; text-decoration: none;">Configure API Keys &rarr;</a>
 </div>
 {% endif %}
+{% if msg %}
+<div class="msg" style="margin-bottom: 16px;">{{ msg }}</div>
+{% endif %}
 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
   <div>
     <h1 style="margin: 0;">Model Dashboard</h1>
     <p class="muted" style="margin: 4px 0 0 0;">Live state from Redis · generated {{ generated_at }}</p>
   </div>
   <div>
-    <button onclick="window.location.reload()" style="padding: 6px 14px; font-size: 0.9em; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; background: #374151; color: #f3f4f6; border: 1px solid #4b5563; border-radius: 6px;">
-      ↻ Refresh
-    </button>
+    <form method="post" action="/models/probe" style="display: inline;">
+      <button type="submit" style="padding: 6px 14px; font-size: 0.9em; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; background: #374151; color: #f3f4f6; border: 1px solid #4b5563; border-radius: 6px;">
+        ↻ Refresh Status
+      </button>
+    </form>
   </div>
 </div>
 <table>
   <thead>
     <tr>
       <th>Status</th><th>Provider</th><th>Model</th><th>Tier</th>
-      <th>Score</th><th>Circuit</th><th>Last success</th><th>Enabled</th>
+      <th>Score</th><th>Circuit</th><th>Last success</th><th>Enabled</th><th>Action</th>
     </tr>
   </thead>
   <tbody>
@@ -40,9 +45,14 @@
       <td><span class="badge">{{ m.circuit }}</span></td>
       <td>{{ m.last_success or "—" }}</td>
       <td>{{ "yes" if m.enabled else "no" }}</td>
+      <td>
+        <form class="inline" method="post" action="/models/{{ m.provider }}/{{ m.model_name | urlencode }}/toggle">
+          <button type="submit">{{ "Disable" if m.enabled else "Enable" }}</button>
+        </form>
+      </td>
     </tr>
     {% else %}
-    <tr><td colspan="8" class="muted">No models in registry. Run the setup wizard / seeder.</td></tr>
+    <tr><td colspan="9" class="muted">No models in registry. Run the setup wizard / seeder.</td></tr>
     {% endfor %}
   </tbody>
 </table>

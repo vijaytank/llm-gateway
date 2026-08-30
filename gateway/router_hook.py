@@ -163,10 +163,12 @@ class RouterHook:
             score_key = f"gateway:model:{model_name}:score"
             redis_score = None
             if self.redis:
-                try:
-                    redis_score = float(self.redis.get(score_key) or -1)
-                except (ValueError, TypeError):
-                    redis_score = None
+                raw_score = self.redis.get(score_key)
+                if raw_score is not None:
+                    try:
+                        redis_score = float(raw_score)
+                    except (ValueError, TypeError):
+                        redis_score = None
             
             # 3. If no Redis score, compute using the scoring formula
             # (only if Redis is unavailable — fail-safe mode)
@@ -312,3 +314,24 @@ class RouterHook:
             unique_chain.sort(key=sort_key, reverse=True)
 
         return unique_chain
+
+    def resolve_fallback_for_model(self, model_name: str) -> Optional[str]:
+        """
+        Resolve the appropriate capability fallback group when a specific model
+        is circuited, unavailable, or excluded from routing.
+        """
+        if not model_name or model_name.startswith("auto-"):
+            return model_name
+
+        lowered = model_name.lower()
+        if "reasoning" in lowered or "r1" in lowered or "70b" in lowered or "qwq" in lowered:
+            candidate = "auto-reasoning-free"
+        elif "code" in lowered or "coder" in lowered:
+            candidate = "auto-code-free"
+        else:
+            candidate = "auto-free"
+
+        # If candidate group itself is not completely open, return it
+        if self.cb_manager.get_state(candidate) != "open":
+            return candidate
+        return "auto-free"

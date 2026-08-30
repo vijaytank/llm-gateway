@@ -75,7 +75,7 @@ def client(ui_env):
 # ---------------------------------------------------------------------------
 
 def test_unauthenticated_redirects_to_login_or_setup(client):
-    for path in ("/", "/providers", "/stats", "/logs"):
+    for path in ("/", "/config", "/stats", "/logs"):
         resp = client.get(path, follow_redirects=False)
         assert resp.status_code == 303, path
         # First run (no admin password) → setup; afterwards → login
@@ -292,3 +292,175 @@ def test_custom_provider_flows_into_litellm_model_list(ui_env, monkeypatch):
     cfg = GatewayConfig.load_from_file(os.environ["GATEWAY_CONFIG_PATH"])
     names = [m["model_name"] for m in get_models_from_registry(cfg)]
     assert "flowco-auto" in names
+
+
+# ---------------------------------------------------------------------------
+# Model toggle & probe tests (Fix 2 & Fix 3)
+# ---------------------------------------------------------------------------
+
+def test_model_toggle_disables_then_enables(client, ui_env):
+    _login(client)
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import Session
+    from schemas.db import ModelRegistry
+
+    engine = create_engine(os.environ["DATABASE_URL"])
+
+    resp = client.post(
+        "/models/nvidia/meta%2Fllama-3.1-8b-instruct/toggle",
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    with Session(engine) as db:
+        row = db.execute(
+            select(ModelRegistry).where(
+                ModelRegistry.provider == "nvidia",
+                ModelRegistry.model_name == "meta/llama-3.1-8b-instruct",
+            )
+        ).scalar_one()
+        assert row.enabled is False
+
+    client.post("/models/nvidia/meta%2Fllama-3.1-8b-instruct/toggle")
+    with Session(engine) as db:
+        row = db.execute(
+            select(ModelRegistry).where(
+                ModelRegistry.provider == "nvidia",
+                ModelRegistry.model_name == "meta/llama-3.1-8b-instruct",
+            )
+        ).scalar_one()
+        assert row.enabled is True
+
+
+def test_model_toggle_unknown_returns_404(client):
+    _login(client)
+    resp = client.post(
+        "/models/nvidia/nonexistent-model/toggle",
+        follow_redirects=False,
+    )
+    assert resp.status_code == 404
+
+
+def test_probe_endpoint_returns_202_or_303(client, ui_env):
+    _login(client)
+    resp = client.post("/models/probe", follow_redirects=False)
+    assert resp.status_code in (202, 303)
+
+
+# ---------------------------------------------------------------------------
+# Builtin provider toggle & Config page tests (Fix 4 & Fix 5)
+# ---------------------------------------------------------------------------
+
+def test_builtin_provider_toggle_disables_groq(client, ui_env):
+    _login(client)
+    from schemas.config import GatewayConfig
+
+    resp = client.post("/providers/groq/toggle", follow_redirects=False)
+    assert resp.status_code == 303
+
+    cfg = GatewayConfig.load_from_file(os.environ["GATEWAY_CONFIG_PATH"])
+    assert cfg.providers.groq.enabled is False
+
+    client.post("/providers/groq/toggle")
+    cfg = GatewayConfig.load_from_file(os.environ["GATEWAY_CONFIG_PATH"])
+    assert cfg.providers.groq.enabled is True
+
+
+def test_builtin_provider_toggle_unknown_returns_404(client):
+    _login(client)
+    resp = client.post("/providers/nonexistent_xyz/toggle", follow_redirects=False)
+    assert resp.status_code == 404
+
+
+def test_config_page_shows_providers_and_credentials(client):
+    _login(client)
+    resp = client.get("/config")
+    assert resp.status_code == 200
+    assert "Built-in providers" in resp.text
+    assert "API Keys" in resp.text
+
+
+def test_providers_url_serves_config(client):
+    _login(client)
+    resp = client.get("/providers", follow_redirects=False)
+    assert resp.status_code == 200
+    assert "Built-in providers" in resp.text
+
+
+def test_credentials_url_serves_config(client):
+    _login(client)
+    resp = client.get("/credentials", follow_redirects=False)
+    assert resp.status_code == 200
+    assert "API Keys" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# Logs filter tests (Fix 6)
+# ---------------------------------------------------------------------------
+
+def _seed_logs(engine, entries):
+    from schemas.db import RequestLog
+    from sqlalchemy.orm import Session
+    with Session(engine) as db:
+        for e in entries:
+            db.add(RequestLog(**e))
+        db.commit()
+
+
+def test_logs_filter_by_status(client, ui_env):
+    _login(client)
+    from sqlalchemy import create_engine
+    engine = create_engine(os.environ["DATABASE_URL"])
+    _seed_logs(engine, [
+        {"virtual_model": "auto-free", "actual_model": "nvidia-auto",
+         "provider": "nvidia", "status": "success"},
+        {"virtual_model": "auto-free", "actual_model": "groq-auto-free",
+         "provider": "groq", "status": "error"},
+    ])
+    html = client.get("/logs?status=error").text
+    assert "groq-auto-free" in html
+    assert "nvidia-auto" not in html
+
+
+def test_logs_filter_by_provider(client, ui_env):
+    _login(client)
+    from sqlalchemy import create_engine
+    engine = create_engine(os.environ["DATABASE_URL"])
+    _seed_logs(engine, [
+        {"virtual_model": "auto-free", "actual_model": "nvidia-auto",
+         "provider": "nvidia", "status": "success"},
+        {"virtual_model": "auto-free", "actual_model": "groq-auto-free",
+         "provider": "groq", "status": "success"},
+    ])
+    html = client.get("/logs?provider=nvidia").text
+    assert "nvidia-auto" in html
+    assert "groq-auto-free" not in html
+
+
+def test_logs_search_by_model_name(client, ui_env):
+    _login(client)
+    from sqlalchemy import create_engine
+    engine = create_engine(os.environ["DATABASE_URL"])
+    _seed_logs(engine, [
+        {"virtual_model": "auto-free", "actual_model": "nvidia-auto",
+         "provider": "nvidia", "status": "success"},
+        {"virtual_model": "auto-reasoning-free", "actual_model": "cerebras-reasoning-free",
+         "provider": "cerebras", "status": "success"},
+    ])
+    html = client.get("/logs?q=cerebras").text
+    assert "cerebras-reasoning-free" in html
+    assert "nvidia-auto" not in html
+
+
+def test_logs_pagination_preserves_filters(client, ui_env):
+    _login(client)
+    from sqlalchemy import create_engine
+    engine = create_engine(os.environ["DATABASE_URL"])
+    _seed_logs(engine, [
+        {"virtual_model": "auto-free", "actual_model": f"model-{i}",
+         "provider": "nvidia", "status": "error"}
+        for i in range(60)
+    ])
+    html = client.get("/logs?status=error&page=1").text
+    assert "status=error" in html
+    assert "page=2" in html
+

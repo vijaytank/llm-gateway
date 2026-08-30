@@ -102,3 +102,12 @@ def test_no_redis_is_safe_noop():
     cb = CircuitBreakerManager(None)
     cb.record_failure("x")           # must not raise
     assert cb.get_state("x") == "closed"
+
+
+def test_permanent_eol_failure_opens_immediately(cb, fake_redis):
+    """A single 410/404 EOL permanent failure must immediately open the circuit with 24h cooldown."""
+    cb.record_permanent_failure("model-eol", reason="eol")
+    assert cb.get_state("model-eol") == "open"
+    # Cooldown key must be set
+    assert fake_redis.exists("gateway:model:model-eol:cooldown:eol") == 1
+    assert fake_redis.ttl("gateway:model:model-eol:circuit") > 1800

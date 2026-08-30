@@ -343,16 +343,20 @@ class StreamReader:
             pipe.expire(rpd_key, 86400)
             pipe.execute()
             
-            # Compute new score using the formula from Issue 5
-            new_score = compute_score(
-                model_name=model_name,
-                provider=event.provider or "unknown",
-                status=event.status,
-                latency_ms=event.latency_ms,
-                input_tokens=event.input_tokens,
-                output_tokens=event.output_tokens,
-                window_size=self.window_size,
-            )
+            canonical = classify_error(error_code=event.error_code, error_type=event.error_type)
+            if canonical in ("eol", "not_found"):
+                new_score = -1.0
+            else:
+                # Compute new score using the formula from Issue 5
+                new_score = compute_score(
+                    model_name=model_name,
+                    provider=event.provider or "unknown",
+                    status=event.status,
+                    latency_ms=event.latency_ms,
+                    input_tokens=event.input_tokens,
+                    output_tokens=event.output_tokens,
+                    window_size=self.window_size,
+                )
             
             # Write score to Redis with TTL
             score_key = f"gateway:model:{model_name}:score"
@@ -361,6 +365,12 @@ class StreamReader:
                 self.score_ttl,
                 new_score,
             )
+            if event.provider and not model_name.startswith(f"{event.provider}/"):
+                self.redis.setex(
+                    f"gateway:model:{event.provider}/{model_name}:score",
+                    self.score_ttl,
+                    new_score,
+                )
             
             # Maintain a rolling latency window in Redis (list capped at window_size)
             latency_key = f"gateway:model:{model_name}:latency_window"
@@ -444,6 +454,13 @@ class StreamReader:
             if canonical == "auth_error":
                 # Auth failure: open immediately with the 24-hour cooldown.
                 cb.record_auth_failure(model_name)
+                if event.provider and not model_name.startswith(f"{event.provider}/"):
+                    cb.record_auth_failure(f"{event.provider}/{model_name}")
+            elif canonical in ("eol", "not_found"):
+                # Permanent model decommission / not found: open immediately with 24-hour cooldown
+                cb.record_permanent_failure(model_name, reason=canonical)
+                if event.provider and not model_name.startswith(f"{event.provider}/"):
+                    cb.record_permanent_failure(f"{event.provider}/{model_name}", reason=canonical)
             elif canonical == "rate_limit":
                 # Rate limit: increment failure count with 429 cooldown path
                 cb.record_failure(model_name, is_429=True)

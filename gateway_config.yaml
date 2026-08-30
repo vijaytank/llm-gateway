@@ -1,7 +1,7 @@
 meta:
   schema_version: '1.0'
 general_settings:
-  master_key: "REPLACE_ME__set_LITELLM_MASTER_KEY_in_docker_dot_env"
+  master_key: REPLACE_ME__set_LITELLM_MASTER_KEY_in_docker_dot_env
   database_url: ${GATEWAY_DB_URL}
   redis_url: ${GATEWAY_REDIS_URL}
   background_health_checks: true
@@ -36,7 +36,7 @@ providers:
     warn_on_charge_risk: false
     effective_rpd: null
   openrouter:
-    enabled: true
+    enabled: false
     tier: free
     probe_timeout_seconds: 12
     extra_headers:
@@ -45,14 +45,14 @@ providers:
     warn_on_charge_risk: true
     effective_rpd: 40
   groq:
-    enabled: true
+    enabled: false
     tier: free
     probe_timeout_seconds: 12
     extra_headers: {}
     warn_on_charge_risk: false
     effective_rpd: null
   cerebras:
-    enabled: true
+    enabled: false
     tier: free
     probe_timeout_seconds: 12
     extra_headers: {}

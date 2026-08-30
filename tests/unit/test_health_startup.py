@@ -99,3 +99,43 @@ async def test_run_health_checks_partitions_providers(rclient, monkeypatch):
     assert sorted(probed) == ["cerebras", "leftover", "nvidia"]
     assert results["nvidia"] == "healthy"
     assert rclient.get("gateway:model:leftover:status") == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_run_wave_writes_per_model_status_keys(rclient, monkeypatch):
+    """When models_by_provider is supplied, each model gets its own status key."""
+    async def fake_probe(client, base_url, name):
+        return hs.ProbeResult(name, True, "healthy", 200)
+
+    monkeypatch.setattr(hs, "probe_provider", fake_probe)
+    models_by_provider = {
+        "nvidia": ["meta/llama-3.3-70b-instruct", "deepseek-ai/deepseek-r1"],
+    }
+    await hs._run_wave(
+        None,
+        [{"name": "nvidia", "base_url": "http://n"}],
+        rclient,
+        "test wave",
+        models_by_provider=models_by_provider,
+    )
+    # Per-model keys must exist
+    assert rclient.get("gateway:model:nvidia/meta/llama-3.3-70b-instruct:status") == "healthy"
+    assert rclient.get("gateway:model:nvidia/deepseek-ai/deepseek-r1:status") == "healthy"
+    # Old provider-level key must NOT be written when models_by_provider is supplied
+    assert rclient.get("gateway:model:nvidia:status") is None
+
+
+@pytest.mark.asyncio
+async def test_run_wave_falls_back_to_provider_key_without_model_map(rclient, monkeypatch):
+    """Existing behaviour preserved when models_by_provider is omitted."""
+    async def fake_probe(client, base_url, name):
+        return hs.ProbeResult(name, True, "healthy", 200)
+
+    monkeypatch.setattr(hs, "probe_provider", fake_probe)
+    await hs._run_wave(
+        None,
+        [{"name": "good", "base_url": "http://g"}],
+        rclient,
+        "test wave",
+    )
+    assert rclient.get("gateway:model:good:status") == "healthy"

@@ -32,7 +32,9 @@ from brain.config import (
 COOLDOWN_RATE_LIMIT = "rate_limit"
 COOLDOWN_SERVER_ERROR = "server_error"
 COOLDOWN_AUTH = "auth"
-ALL_COOLDOWN_TYPES = (COOLDOWN_RATE_LIMIT, COOLDOWN_SERVER_ERROR, COOLDOWN_AUTH)
+COOLDOWN_EOL = "eol"
+COOLDOWN_NOT_FOUND = "not_found"
+ALL_COOLDOWN_TYPES = (COOLDOWN_RATE_LIMIT, COOLDOWN_SERVER_ERROR, COOLDOWN_AUTH, COOLDOWN_EOL, COOLDOWN_NOT_FOUND)
 
 
 class CircuitBreakerManager:
@@ -167,6 +169,20 @@ class CircuitBreakerManager:
         # Open the circuit directly with the auth cooldown.
         self._set_state(model_name, "open", ttl=CIRCUIT_BREAKER_COOLDOWN_AUTH)
         self._set_cooldown(model_name, COOLDOWN_AUTH, CIRCUIT_BREAKER_COOLDOWN_AUTH)
+        self._reset_failures(model_name)
+
+    def record_permanent_failure(self, model_name: str, reason: str = "eol") -> None:
+        """
+        Record a permanent unrecoverable failure (410 Gone / 404 Not Found / EOL).
+        Immediately transitions the circuit to open with a 24-hour cooldown so the
+        model is excluded from routing and never repeatedly hammered.
+        """
+        if not self.redis:
+            return
+
+        cooldown_type = COOLDOWN_NOT_FOUND if reason == "not_found" else COOLDOWN_EOL
+        self._set_state(model_name, "open", ttl=CIRCUIT_BREAKER_COOLDOWN_AUTH)
+        self._set_cooldown(model_name, cooldown_type, CIRCUIT_BREAKER_COOLDOWN_AUTH)
         self._reset_failures(model_name)
 
     def record_failure(self, model_name: str, is_429: bool = False) -> None:
